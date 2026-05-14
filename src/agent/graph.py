@@ -56,6 +56,8 @@ class State(TypedDict, total=False):
     weekly_plan: WeeklyPlan
     daily_plan: DailyPlan
     qa_history: list[dict[str, str]]
+    review_feedback_history: list[str]
+    previous_draft: dict[str, object]
     draft: dict[str, object]
     response: str
 
@@ -77,6 +79,8 @@ def load_context(state: State) -> dict[str, object]:
         "weekly_plan": _load_weekly_plan(paths.weekly_plan_file),
         "daily_plan": _load_daily_plan(paths.daily_plan_file),
         "qa_history": state.get("qa_history", []),
+        "review_feedback_history": state.get("review_feedback_history", []),
+        "previous_draft": state.get("previous_draft"),
     }
 
     if intent == "weekly_plan":
@@ -98,6 +102,8 @@ async def weekly_plan(state: State) -> dict[str, object] | Command[str]:
         long_term_items=state.get("long_term_items", []),
         weekly_plan=state["weekly_plan"],
         qa_history=state.get("qa_history", []),
+        review_feedback_history=state.get("review_feedback_history", []),
+        previous_draft=state.get("previous_draft"),
     )
     return _handle_llm_decision(
         state=state,
@@ -112,6 +118,8 @@ async def temp_plan(state: State) -> dict[str, object] | Command[str]:
     decision = await plan_temp_turn(
         weekly_plan=state["weekly_plan"],
         qa_history=state.get("qa_history", []),
+        review_feedback_history=state.get("review_feedback_history", []),
+        previous_draft=state.get("previous_draft"),
     )
     return _handle_llm_decision(
         state=state,
@@ -128,6 +136,8 @@ async def daily_plan(state: State) -> dict[str, object] | Command[str]:
         weekly_plan=state["weekly_plan"],
         daily_plan=state["daily_plan"],
         qa_history=state.get("qa_history", []),
+        review_feedback_history=state.get("review_feedback_history", []),
+        previous_draft=state.get("previous_draft"),
     )
     return _handle_llm_decision(
         state=state,
@@ -143,6 +153,8 @@ async def daily_reflect(state: State) -> dict[str, object] | Command[str]:
         current_date=state["current_date"],
         daily_plan=state["daily_plan"],
         qa_history=state.get("qa_history", []),
+        review_feedback_history=state.get("review_feedback_history", []),
+        previous_draft=state.get("previous_draft"),
     )
     return _handle_llm_decision(
         state=state,

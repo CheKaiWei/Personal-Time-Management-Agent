@@ -39,6 +39,8 @@ async def plan_weekly_turn(
     long_term_items: list[LongTermItem],
     weekly_plan: WeeklyPlan,
     qa_history: list[dict[str, str]] | None,
+    review_feedback_history: list[str] | None = None,
+    previous_draft: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Use the LLM to choose weekly checkpoints or ask a clarifying question."""
     fallback = build_weekly_plan_draft(
@@ -61,6 +63,7 @@ Rules:
 - A checkpoint is a weekly outcome, not a micro-action.
 - Prefer meaningful progress on important and urgent work, but do not blindly sort.
 - Keep or mention relevant temp tasks only when they really matter this week.
+- If review feedback exists, revise the previous draft to satisfy it unless it conflicts with the file context.
 - If the current context is enough, finalize.
 - If an important tradeoff is unclear, ask one concise question.
 
@@ -89,6 +92,8 @@ Return JSON with this shape:
         prompt=prompt,
         context=context,
         qa_history=qa_history or [],
+        review_feedback_history=review_feedback_history or [],
+        previous_draft=previous_draft,
     )
     return _normalize_weekly_decision(decision, fallback=fallback, long_term_items=long_term_items)
 
@@ -97,6 +102,8 @@ async def plan_temp_turn(
     *,
     weekly_plan: WeeklyPlan,
     qa_history: list[dict[str, str]] | None,
+    review_feedback_history: list[str] | None = None,
+    previous_draft: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Use the LLM to structure temp tasks or ask a clarifying question."""
     fallback = build_temp_plan_draft(weekly_plan)
@@ -110,6 +117,7 @@ Goal: structure the raw Temp Tasks into useful categories and urgency levels.
 Rules:
 - Do not rely on keywords alone. Use task meaning.
 - For each task, decide category, urgency, and whether it should enter this week.
+- If review feedback exists, revise the previous draft to satisfy it unless it conflicts with the file context.
 - If a task is too ambiguous to classify well, ask one concise question.
 - If the current context is enough, finalize.
 
@@ -136,6 +144,8 @@ Return JSON with this shape:
         prompt=prompt,
         context=context,
         qa_history=qa_history or [],
+        review_feedback_history=review_feedback_history or [],
+        previous_draft=previous_draft,
     )
     return _normalize_temp_decision(decision, fallback=fallback)
 
@@ -146,6 +156,8 @@ async def plan_daily_turn(
     weekly_plan: WeeklyPlan,
     daily_plan: DailyPlan,
     qa_history: list[dict[str, str]] | None,
+    review_feedback_history: list[str] | None = None,
+    previous_draft: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Use the LLM to choose today's checkpoint and MEUs."""
     fallback = build_daily_plan_draft(
@@ -167,6 +179,7 @@ Rules:
 - If today's calendar already contains meaningful focus blocks, align with them unless
   there is a strong reason not to.
 - Each MEU must be concrete and verifiable.
+- If review feedback exists, revise the previous draft to satisfy it unless it conflicts with the file context.
 - Ask a concise clarifying question only if today's focus is genuinely ambiguous.
 
 Return JSON with this shape:
@@ -192,6 +205,8 @@ Return JSON with this shape:
         prompt=prompt,
         context=context,
         qa_history=qa_history or [],
+        review_feedback_history=review_feedback_history or [],
+        previous_draft=previous_draft,
     )
     return _normalize_daily_decision(decision, fallback=fallback)
 
@@ -201,6 +216,8 @@ async def plan_daily_reflect_turn(
     current_date: str,
     daily_plan: DailyPlan,
     qa_history: list[dict[str, str]] | None,
+    review_feedback_history: list[str] | None = None,
+    previous_draft: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Use the LLM to ask reflection questions and summarize the day."""
     fallback = build_daily_reflect_draft(
@@ -219,6 +236,7 @@ Rules:
 - You may ask follow-up questions to verify completion, blockers, and tomorrow's impact.
 - If the existing evidence is already enough, you may finalize immediately.
 - When asking, ask only one concise question at a time.
+- If review feedback exists, revise the previous draft to satisfy it unless it conflicts with the file context.
 - Final reflection should focus on: completed work, incomplete work, deviation reasons,
   and tomorrow's next focus.
 
@@ -240,6 +258,8 @@ Return JSON with this shape:
         prompt=prompt,
         context=context,
         qa_history=qa_history or [],
+        review_feedback_history=review_feedback_history or [],
+        previous_draft=previous_draft,
     )
     return _normalize_daily_reflect_decision(decision, fallback=fallback)
 
@@ -525,6 +545,8 @@ async def _request_llm_decision(
     prompt: str,
     context: dict[str, Any],
     qa_history: list[dict[str, str]],
+    review_feedback_history: list[str],
+    previous_draft: dict[str, Any] | None,
     client: AsyncOpenAI | None = None,
 ) -> dict[str, Any]:
     settings = resolve_openai_settings(system_prompt=PLANNER_SYSTEM_PROMPT)
@@ -534,6 +556,10 @@ async def _request_llm_decision(
             f"Clarification turns used: {len(qa_history)} / {MAX_QA_TURNS}",
             "Prior Q&A:",
             _format_qa_history(qa_history),
+            "Review feedback history:",
+            _format_review_feedback_history(review_feedback_history),
+            "Previous draft JSON:",
+            json.dumps(previous_draft or {}, ensure_ascii=False, indent=2),
             "Context JSON:",
             json.dumps(context, ensure_ascii=False, indent=2),
         ]
@@ -769,6 +795,15 @@ def _format_qa_history(qa_history: list[dict[str, str]]) -> str:
         lines.append(f"Q{index}: {item['question']}")
         lines.append(f"A{index}: {item['answer']}")
     return "\n".join(lines)
+
+
+def _format_review_feedback_history(review_feedback_history: list[str]) -> str:
+    if not review_feedback_history:
+        return "None"
+    return "\n".join(
+        f"Feedback {index}: {feedback}"
+        for index, feedback in enumerate(review_feedback_history, start=1)
+    )
 
 
 def _extract_json_payload(text: str) -> dict[str, Any]:

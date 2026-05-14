@@ -28,7 +28,8 @@ MENU_OPTIONS: dict[str, tuple[str, Intent]] = {
     "3": ("Daily Plan", "daily_plan"),
     "4": ("Daily Reflect", "daily_reflect"),
 }
-CANCEL_WORDS = {"exit", "quit", "cancel"}
+CANCEL_WORDS = {"exit", "quit", "cancel", "取消"}
+APPROVE_WORDS = {"通过", "pass", "approve", "approved", "ok", "yes", "y"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -68,53 +69,89 @@ async def run_workflow(
 ) -> dict[str, object]:
     """Run one workflow, allow multi-turn Q&A, and optionally write files."""
     resolved_date = current_date or date.today().isoformat()
-    thread_id = build_thread_id(intent=intent, current_date=resolved_date, calendar_dir=calendar_dir)
-    config = {"configurable": {"thread_id": thread_id}}
-    payload: dict[str, Any] | Command = {
+    base_thread_id = build_thread_id(intent=intent, current_date=resolved_date, calendar_dir=calendar_dir)
+    base_payload: dict[str, Any] = {
         "intent": intent,
         "current_date": resolved_date,
         "calendar_dir": str(calendar_dir),
     }
+    review_feedback_history: list[str] = []
+    previous_result: dict[str, Any] | None = None
+    review_round = 0
 
     while True:
-        result = await invoke_graph(payload, config)
-        interrupt_payload = extract_interrupt_payload(result)
-        if not interrupt_payload:
-            break
+        thread_id = build_review_thread_id(base_thread_id=base_thread_id, review_round=review_round)
+        payload = dict(base_payload)
+        if previous_result is not None:
+            payload["qa_history"] = previous_result.get("qa_history", [])
+            payload["review_feedback_history"] = review_feedback_history
+            payload["previous_draft"] = previous_result["draft"]
 
-        answer = ask_llm_question(interrupt_payload)
-        if answer is None:
-            sys.stdout.write("Workflow cancelled.\n")
-            return {"cancelled": True, "thread_id": thread_id}
-        payload = Command(resume=answer)
+        result = await run_planning_round(payload=payload, thread_id=thread_id)
+        if result.get("cancelled"):
+            return result
 
-    patches = build_patches(
-        intent=intent,
-        current_date=resolved_date,
-        calendar_dir=calendar_dir,
-        result=result,
-    )
+        patches = build_patches(
+            intent=intent,
+            current_date=resolved_date,
+            calendar_dir=calendar_dir,
+            result=result,
+        )
 
-    sys.stdout.write(f"{result['response']}\n\n")
-    sys.stdout.write("Planned file updates:\n")
-    for patch in patches:
-        sys.stdout.write(f"- {patch.path}: {patch.summary}\n")
+        sys.stdout.write(f"{result['response']}\n\n")
+        sys.stdout.write("Planned file updates:\n")
+        for patch in patches:
+            sys.stdout.write(f"- {patch.path}: {patch.summary}\n")
 
-    should_apply = apply or (prompt_on_write and confirm_apply())
-    if should_apply:
-        apply_file_patches(patches)
-        sys.stdout.write("Files written.\n")
-    else:
-        sys.stdout.write("Files not written.\n")
+        result["patches"] = patches
+        result["thread_id"] = thread_id
 
-    result["patches"] = patches
-    result["thread_id"] = thread_id
-    return result
+        if apply:
+            apply_file_patches(patches)
+            sys.stdout.write("Files written.\n")
+            return result
+
+        if not prompt_on_write:
+            sys.stdout.write("Files not written.\n")
+            return result
+
+        review_action = ask_for_review_action()
+        if review_action is None:
+            sys.stdout.write("Files not written.\n")
+            result["cancelled"] = True
+            return result
+        if is_approval(review_action):
+            apply_file_patches(patches)
+            sys.stdout.write("Files written.\n")
+            return result
+
+        review_feedback_history.append(review_action)
+        previous_result = result
+        review_round += 1
+        sys.stdout.write("Revising draft based on your feedback...\n")
 
 
 async def invoke_graph(payload: dict[str, Any] | Command, config: dict[str, Any]) -> dict[str, Any]:
     """Invoke the graph with state or a resume command."""
     return await graph.ainvoke(payload, config)
+
+
+async def run_planning_round(*, payload: dict[str, Any], thread_id: str) -> dict[str, Any]:
+    """Run one planning round, including any LLM clarification interrupts."""
+    config = {"configurable": {"thread_id": thread_id}}
+    current_payload: dict[str, Any] | Command = payload
+
+    while True:
+        result = await invoke_graph(current_payload, config)
+        interrupt_payload = extract_interrupt_payload(result)
+        if not interrupt_payload:
+            return result
+
+        answer = ask_llm_question(interrupt_payload)
+        if answer is None:
+            sys.stdout.write("Workflow cancelled.\n")
+            return {"cancelled": True, "thread_id": thread_id}
+        current_payload = Command(resume=answer)
 
 
 def extract_interrupt_payload(result: dict[str, Any]) -> dict[str, Any] | None:
@@ -196,9 +233,30 @@ def build_thread_id(*, intent: Intent, current_date: str, calendar_dir: Path) ->
     return f"day_reflect:{current_date}"
 
 
-def confirm_apply() -> bool:
-    """Ask whether to write the generated file patches."""
-    return input("Write these file updates? [y/N]: ").strip().lower() in {"y", "yes"}
+def build_review_thread_id(*, base_thread_id: str, review_round: int) -> str:
+    """Build an isolated thread id for each review regeneration round."""
+    if review_round == 0:
+        return base_thread_id
+    return f"{base_thread_id}:review:{review_round}"
+
+
+def ask_for_review_action() -> str | None:
+    """Ask for iterative review feedback before applying file writes."""
+    try:
+        action = input(
+            "输入修改意见继续调整；输入“通过”写文件；输入“取消”退出: "
+        ).strip()
+    except EOFError:
+        return None
+
+    if not action or action.lower() in CANCEL_WORDS:
+        return None
+    return action
+
+
+def is_approval(action: str) -> bool:
+    """Return whether the review action means the user approves the draft."""
+    return action.strip().lower() in APPROVE_WORDS
 
 
 def choose_intent() -> Intent:

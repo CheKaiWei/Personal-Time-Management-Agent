@@ -110,3 +110,30 @@ Result:
 
 Result:
 - The agent now defaults to the smaller and faster model unless an explicit model is configured.
+
+## 2026-05-14 Draft Review Dialogue Upgrade
+
+1. Extended graph/planner state with:
+   - `review_feedback_history`
+   - `previous_draft`
+2. Passed those fields into all four LLM planning actions, so later rounds can revise
+   the previous draft instead of regenerating blindly.
+3. Replaced the final write confirmation in `src/agent/cli.py`:
+   - old: one-shot `Y/N`
+   - new: iterative review loop
+   - user can:
+     - input revision feedback to regenerate
+     - input `通过` to write files
+     - input `取消` / `exit` / `quit` / `cancel` to stop
+4. Added CLI test coverage for:
+   - preview only
+   - direct `--apply`
+   - pre-draft interrupt Q&A
+   - post-draft revision until approval
+
+Result:
+- File writes now happen only after the user explicitly approves the current draft.
+- The same workflow can be revised multiple times through natural dialogue before writing.
+- Verified:
+  - `uv run python -m pytest`
+  - `uv run ruff check .`
