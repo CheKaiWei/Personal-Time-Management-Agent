@@ -38,3 +38,8 @@
 结果：
 - 已建立后续流程可复用的文件访问层。
 - 最小验证通过：`uv run python -m pytest tests/unit_tests/test_calendar_files.py`
+
+3. 根据 `calendar/2026-05-11 Weekly Plan.md` 样例，将 `week_start` 约定修正为“周一起始”。
+
+结果补充：
+- 周计划路径现与样例命名一致，避免后续读写错位一日。

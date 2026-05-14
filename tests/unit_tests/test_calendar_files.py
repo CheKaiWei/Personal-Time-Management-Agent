@@ -11,11 +11,11 @@ from agent.calendar_files import (
 )
 
 
-def test_resolve_calendar_paths_uses_sunday_week_start() -> None:
+def test_resolve_calendar_paths_uses_monday_week_start() -> None:
     paths = resolve_calendar_paths(Path("calendar"), "2026-05-14")
 
-    assert paths.week_start == "2026-05-10"
-    assert paths.weekly_plan_file == Path("calendar") / "2026-05-10 Weekly Plan.md"
+    assert paths.week_start == "2026-05-11"
+    assert paths.weekly_plan_file == Path("calendar") / "2026-05-11 Weekly Plan.md"
     assert paths.daily_plan_file == Path("calendar") / "2026-05-14.md"
     assert paths.long_term_file == Path("calendar") / "2026-05 Long-term.univer.md"
 

@@ -67,7 +67,7 @@ class DailyPlan:
 def resolve_calendar_paths(base_dir: Path, current_date: str) -> CalendarPaths:
     """Resolve the files used by the current planning request."""
     parsed_date = datetime.strptime(current_date, "%Y-%m-%d").date()
-    week_start = parsed_date - timedelta(days=(parsed_date.weekday() + 1) % 7)
+    week_start = parsed_date - timedelta(days=parsed_date.weekday())
     month_key = parsed_date.strftime("%Y-%m")
 
     return CalendarPaths(
