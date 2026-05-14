@@ -184,3 +184,33 @@ Result:
 - Verified:
   - `uv run python -m pytest` (`28 passed`)
   - `uv run python -m ruff check .`
+
+## 2026-05-15 Reflect Workflow Split
+
+1. Reworked `Reflect` into three sub-flows:
+   - `daily_reflect`
+   - `weekly_reflect`
+   - `long_term_reflect`
+2. Extended `src/agent/graph.py` and `src/agent/planner.py`:
+   - added two new intents and routes
+   - `daily_reflect` now asks a question first and can include `suggested_answers`
+   - `weekly_reflect` now drafts future-day `Calendar` adjustments plus weekly `Adjustment Log` lines
+   - `long_term_reflect` now drafts row-level revisions limited to `E` and `Notes`
+3. Extended file contracts:
+   - `src/agent/calendar_files.py` now exposes long-term workbook parse/render helpers
+   - `src/agent/calendar_writes.py` now supports:
+     - weekly reflect patches for future daily files and weekly logs
+     - long-term reflect patches that only touch `E` and `Notes`
+4. Reworked `src/agent/cli.py`:
+   - menu item `4` changed from `Daily Reflect` to `Reflect`
+   - added a reflect submenu
+   - added direct commands such as `weekly reflect` and `long-term reflect`
+5. Updated README and rewrote tests for the new reflect paths.
+
+Result:
+- Daily reflect now collects user feedback through Q&A with candidate answers before generating the summary.
+- Weekly reflect can reschedule later days in the same week and records the change in `calendar/{week_start} Weekly Plan.md`.
+- Long-term reflect can update only urgency `E` and note text in `calendar/{YYYY-MM} Long-term.univer.md`.
+- Verified:
+  - `uv run python -m pytest` (`35 passed`)
+  - `uv run python -m ruff check .`

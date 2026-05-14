@@ -7,18 +7,26 @@ questions in multiple turns, and only writes files after showing a draft.
 
 ## Workflows
 
-The CLI exposes four planning workflows:
+The CLI exposes four top-level planning workflows:
 
 1. `Weekly Plan`
 2. `Temp Plan`
 3. `Daily Plan`
-4. `Daily Reflect`
+4. `Reflect`
+
+`Reflect` is a submenu with three operations:
+
+1. `Daily Reflect`
+2. `Weekly Reflect`
+3. `Long-term Reflect`
 
 Interactive mode still shows the `1-4` menu, but it also accepts
 natural-language commands such as:
 
 - `weekly plan`
 - `daily reflect`
+- `weekly reflect`
+- `long-term reflect`
 - `open weekly plan`
 - `open daily plan`
 - `open long term`
@@ -31,7 +39,12 @@ The following steps are decided by the LLM, not by fixed keyword rules:
 - `temp_plan`: structure temporary tasks
 - `daily_plan`: turn weekly checkpoints into `2-4` daily focus items and split
   each into `1-3` MEUs
-- `daily_reflect`: ask reflection questions and produce the final summary
+- `daily_reflect`: ask the user about today's real completion state, provide
+  candidate answers, and then generate the final daily summary
+- `weekly_reflect`: analyze this week's executed work so far and decide whether
+  later days in the same week need schedule adjustments
+- `long_term_reflect`: revise only long-term `E` levels and notes based on the
+  weekly plan plus current date pressure
 
 Each workflow can pause and ask the user a clarification question. The CLI then
 resumes the same LangGraph thread and continues planning. This allows multi-turn
@@ -49,6 +62,11 @@ Week start is Monday. For example, `2026-05-14` maps to:
 
 - weekly file: `calendar/2026-05-11 Weekly Plan.md`
 - daily file: `calendar/2026-05-14.md`
+
+Note: the project keeps the existing `calendar/{week_start} Weekly Plan.md`
+convention. For the week of `2026-05-11`, weekly reflect logs are written back
+to `calendar/2026-05-11 Weekly Plan.md`, not to a separate
+`2026-05-weekly_planner.md` file.
 
 ## Install
 
@@ -108,14 +126,17 @@ Run a specific workflow:
 
 ```bash
 uv run python -m agent.cli --intent weekly_plan --date 2026-05-14 --calendar-dir ..\calendar
-uv run python -m agent.cli --intent daily_plan --date 2026-05-14 --calendar-dir ..\calendar --apply
+uv run python -m agent.cli --intent weekly_reflect --date 2026-05-14 --calendar-dir ..\calendar
+uv run python -m agent.cli --intent long_term_reflect --date 2026-05-14 --calendar-dir ..\calendar
 ```
 
 Run a natural-language command directly:
 
 ```bash
 uv run python -m agent.cli "open weekly plan" --date 2026-05-14 --calendar-dir ..\calendar
-uv run python -m agent.cli "daily plan" --date 2026-05-14 --calendar-dir ..\calendar
+uv run python -m agent.cli "daily reflect" --date 2026-05-14 --calendar-dir ..\calendar
+uv run python -m agent.cli "weekly reflect" --date 2026-05-14 --calendar-dir ..\calendar
+uv run python -m agent.cli "long-term reflect" --date 2026-05-14 --calendar-dir ..\calendar
 ```
 
 `--apply` skips the final write confirmation. It does not skip LLM follow-up
@@ -176,12 +197,34 @@ Only rewrites:
 
 - `Reflect`
 
+The first daily-reflect turn now asks the user about the real completion state
+and shows candidate answers before synthesizing the final summary.
+
+### Weekly Reflect
+
+Writes:
+
+- future-day `Calendar` adjustments for the same week only
+- appended lines in the weekly file's `# Adjustment Log`
+
+It does not rewrite past dates.
+
+### Long-term Reflect
+
+Writes only:
+
+- long-term `E` level
+- long-term `Notes`
+
+It does not modify task names, descriptions, status, priority, DDL, or hours.
+
 ## Code Layout
 
 - `src/agent/calendar_files.py`
   - path resolution
   - markdown section parsing
   - Univer long-term table parsing
+  - long-term workbook extraction/rendering
 - `src/agent/planner.py`
   - LLM prompts
   - multi-turn planning decisions
@@ -191,9 +234,9 @@ Only rewrites:
   - interrupt/resume loop
 - `src/agent/calendar_writes.py`
   - file patch generation
-  - writing files
+  - weekly reflect / long-term reflect write boundaries
 - `src/agent/cli.py`
-  - menu + natural-language CLI
+  - menu + submenu + natural-language CLI
   - multi-turn user interaction
 
 ## Testing

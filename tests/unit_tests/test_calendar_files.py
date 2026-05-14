@@ -1,10 +1,13 @@
 from pathlib import Path
 
 from agent.calendar_files import (
+    build_week_dates,
     extract_checkbox_items,
     parse_daily_plan,
     parse_long_term_items,
+    parse_long_term_workbook,
     parse_weekly_plan,
+    render_long_term_workbook,
     render_markdown_sections,
     resolve_calendar_paths,
     split_markdown_sections,
@@ -18,6 +21,18 @@ def test_resolve_calendar_paths_uses_monday_week_start() -> None:
     assert paths.weekly_plan_file == Path("calendar") / "2026-05-11 Weekly Plan.md"
     assert paths.daily_plan_file == Path("calendar") / "2026-05-14.md"
     assert paths.long_term_file == Path("calendar") / "2026-05 Long-term.univer.md"
+
+
+def test_build_week_dates_returns_full_week() -> None:
+    assert build_week_dates("2026-05-11") == [
+        "2026-05-11",
+        "2026-05-12",
+        "2026-05-13",
+        "2026-05-14",
+        "2026-05-15",
+        "2026-05-16",
+        "2026-05-17",
+    ]
 
 
 def test_parse_weekly_plan_extracts_sections() -> None:
@@ -81,6 +96,27 @@ def test_parse_long_term_items_reads_tabular_rows() -> None:
     assert items[0].expected_hours == "6h"
     assert items[1].project == "Research"
     assert items[1].ddl == "2026-06-01"
+
+
+def test_render_long_term_workbook_replaces_sheet_payload_only() -> None:
+    text = """
+before
+```sheet
+{"sheetOrder":["sheet-1"],"sheets":{"sheet-1":{"cellData":{"3":{"5":{"v":"E2"}}}}}}
+```
+after
+```multiSheet
+{"tabs":[]}
+```
+""".strip()
+    workbook = parse_long_term_workbook(text)
+    workbook["sheets"]["sheet-1"]["cellData"]["3"]["5"]["v"] = "E1"
+
+    rendered = render_long_term_workbook(text, workbook)
+
+    assert '"E1"' in rendered
+    assert '```multiSheet' in rendered
+    assert rendered.startswith("before")
 
 
 def test_section_round_trip_keeps_structure() -> None:

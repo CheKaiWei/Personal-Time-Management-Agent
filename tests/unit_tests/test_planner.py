@@ -1,5 +1,10 @@
 from agent.calendar_files import DailyPlan, LongTermItem, WeeklyPlan
-from agent.planner import build_daily_plan_draft, build_weekly_plan_draft
+from agent.planner import (
+    build_daily_plan_draft,
+    build_daily_reflect_question,
+    build_long_term_reflect_draft,
+    build_weekly_plan_draft,
+)
 
 
 def test_build_weekly_plan_draft_uses_at_least_five_checkpoints_when_available() -> None:
@@ -69,3 +74,49 @@ def test_build_daily_plan_draft_creates_multiple_focus_items_from_weekly_checkpo
     assert len(draft["focus_items"]) == 3
     assert draft["focus_items"][0]["time_block"] == "- [ ] Existing focus [startTime:: 09:00] [endTime:: 10:00]"
     assert draft["focus_items"][1]["checkpoint"] == "Research / Camera ready"
+
+
+def test_build_daily_reflect_question_contains_suggested_answers() -> None:
+    daily_plan = DailyPlan(
+        calendar=["- [ ] Camera ready [startTime:: 09:00] [endTime:: 10:00]"],
+        tasks=["- [x] Camera ready", "- [ ] Interview prep"],
+        notes=["- 10:30 blocked by messages"],
+        reflect=[],
+        section_order=["Calendar", "Tasks", "Notes", "Reflect"],
+        sections={"Calendar": [], "Tasks": [], "Notes": [], "Reflect": []},
+    )
+
+    question = build_daily_reflect_question(
+        current_date="2026-05-14",
+        daily_plan=daily_plan,
+    )
+
+    assert question["status"] == "needs_input"
+    assert len(question["suggested_answers"]) >= 3
+    assert "Camera ready" in question["suggested_answers"][0]
+
+
+def test_build_long_term_reflect_draft_escalates_urgent_items() -> None:
+    long_term_items = [
+        LongTermItem(
+            row_id="3",
+            project="Research",
+            task="Camera ready",
+            description="",
+            status="todo",
+            p_level="P1",
+            e_level="E3",
+            ddl="2026-05-16",
+            expected_hours=None,
+            actual_hours=None,
+            notes=None,
+        )
+    ]
+
+    draft = build_long_term_reflect_draft(
+        current_date="2026-05-14",
+        long_term_items=long_term_items,
+    )
+
+    assert draft["revisions"][0]["new_e_level"] == "E1"
+    assert "仅剩 2 天" in draft["revisions"][0]["note_append"]

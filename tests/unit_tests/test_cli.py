@@ -3,8 +3,6 @@ import importlib
 import pytest
 
 from agent.cli import (
-    MENU_OPTIONS,
-    choose_intent,
     ensure_backend_ready,
     parse_user_command,
     prompt_for_date,
@@ -22,7 +20,7 @@ def _write_calendar_fixture(tmp_path) -> None:
     (tmp_path / "2026-05 Long-term.univer.md").write_text(
         """
 ```sheet
-{"sheetOrder":["sheet-1"],"sheets":{"sheet-1":{"cellData":{"2":{"0":{"v":"Projects"},"1":{"v":"Tasks"}},"3":{"0":{"v":"Research"},"1":{"v":"Camera ready"},"4":{"v":"P1"},"5":{"v":"E1"},"7":{"v":"6h"}}}}}}
+{"sheetOrder":["sheet-1"],"sheets":{"sheet-1":{"cellData":{"2":{"0":{"v":"Projects"},"1":{"v":"Tasks"}},"3":{"0":{"v":"Research"},"1":{"v":"Camera ready"},"4":{"v":"P1"},"5":{"v":"E2"},"7":{"v":"6h"}}}}}}
 ```
 """.strip(),
         encoding="utf-8",
@@ -34,6 +32,13 @@ def _write_calendar_fixture(tmp_path) -> None:
 
 # Temp Tasks
 - [ ] Renew visa
+
+# Daily Links
+[[2026-05-14]]
+[[2026-05-15]]
+
+# Adjustment Log
+- 2026-05-14: initial plan
 """.strip(),
         encoding="utf-8",
     )
@@ -49,12 +54,36 @@ def _write_calendar_fixture(tmp_path) -> None:
 """.strip(),
         encoding="utf-8",
     )
+    (tmp_path / "2026-05-15.md").write_text(
+        """
+# Calendar
+- [ ] Old block [startTime:: 09:00] [endTime:: 10:00]
+
+# Tasks
+- [ ] Keep this task
+
+# Notes
+- Future note
+
+# Reflect
+""".strip(),
+        encoding="utf-8",
+    )
 
 
-def test_choose_intent_reads_requested_menu_option(monkeypatch) -> None:
-    monkeypatch.setattr("builtins.input", lambda prompt="": "3")
+def test_parse_user_command_supports_reflect_submenu() -> None:
+    command = parse_user_command("reflect")
 
-    assert choose_intent() == MENU_OPTIONS["3"][1]
+    assert command is not None
+    assert command.kind == "reflect_menu"
+
+
+def test_parse_user_command_supports_specific_weekly_reflect() -> None:
+    command = parse_user_command("weekly reflect")
+
+    assert command is not None
+    assert command.kind == "workflow"
+    assert command.intent == "weekly_reflect"
 
 
 def test_parse_user_command_supports_open_weekly_plan() -> None:
@@ -77,7 +106,7 @@ def test_ensure_backend_ready_rejects_missing_calendar_dir(tmp_path) -> None:
         ensure_backend_ready(tmp_path / "missing")
 
 
-async def test_run_workflow_preview_does_not_write_files(monkeypatch, tmp_path) -> None:
+async def test_run_workflow_daily_reflect_preview_does_not_write_files(monkeypatch, tmp_path) -> None:
     _write_calendar_fixture(tmp_path)
 
     async def fake_plan_daily_reflect_turn(**kwargs):
@@ -105,192 +134,95 @@ async def test_run_workflow_preview_does_not_write_files(monkeypatch, tmp_path) 
     assert "Today was stable." not in daily_text
 
 
-async def test_run_workflow_apply_writes_files(monkeypatch, tmp_path) -> None:
+async def test_run_workflow_weekly_reflect_apply_writes_future_schedule(monkeypatch, tmp_path) -> None:
     _write_calendar_fixture(tmp_path)
 
-    async def fake_plan_daily_turn(**kwargs):
+    async def fake_plan_weekly_reflect_turn(**kwargs):
         return {
             "status": "ready",
-            "message": "Draft the main weekly work.",
+            "message": "Weekly adjustment is ready.",
             "draft": {
-                "intent": "daily_plan",
+                "intent": "weekly_reflect",
                 "current_date": "2026-05-14",
-                "focus_items": [
+                "adjustment_log_lines": ["- 2026-05-14: moved interview prep to tomorrow afternoon."],
+                "future_daily_adjustments": [
                     {
-                        "checkpoint": "Research / Camera ready",
-                        "reason": "Highest urgency this week.",
-                        "time_block": "- [ ] Research / Camera ready [startTime:: 09:00] [endTime:: 10:00]",
-                        "meu_candidates": [
-                            {
-                                "action": "Draft the figure checklist",
-                                "expected_minutes": 45,
-                                "verification": "A checklist exists.",
-                            }
+                        "date": "2026-05-15",
+                        "reason": "Recovered time today.",
+                        "calendar_blocks": [
+                            "- [ ] Career / Interview prep [startTime:: 14:00] [endTime:: 15:00]"
                         ],
-                    },
-                    {
-                        "checkpoint": "Career / Interview prep",
-                        "reason": "Keep interview momentum.",
-                        "time_block": "- [ ] Career / Interview prep [startTime:: 14:00] [endTime:: 15:00]",
-                        "meu_candidates": [
-                            {
-                                "action": "Answer three mock questions",
-                                "expected_minutes": 30,
-                                "verification": "Three answers exist.",
-                            }
-                        ],
-                    },
+                    }
                 ],
             },
         }
 
-    monkeypatch.setattr(graph_module, "plan_daily_turn", fake_plan_daily_turn)
+    monkeypatch.setattr(graph_module, "plan_weekly_reflect_turn", fake_plan_weekly_reflect_turn)
 
     await run_workflow(
-        intent="daily_plan",
+        intent="weekly_reflect",
         current_date="2026-05-14",
         calendar_dir=tmp_path,
         apply=True,
         prompt_on_write=False,
     )
 
-    daily_text = (tmp_path / "2026-05-14.md").read_text(encoding="utf-8")
-    assert "Draft the figure checklist. Verify: A checklist exists." in daily_text
-    assert "Answer three mock questions. Verify: Three answers exist." in daily_text
+    weekly_text = (tmp_path / "2026-05-11 Weekly Plan.md").read_text(encoding="utf-8")
+    future_daily_text = (tmp_path / "2026-05-15.md").read_text(encoding="utf-8")
+    assert "moved interview prep to tomorrow afternoon" in weekly_text
+    assert "Career / Interview prep [startTime:: 14:00]" in future_daily_text
 
 
-async def test_run_workflow_revises_until_approved(monkeypatch, tmp_path) -> None:
+async def test_run_workflow_long_term_reflect_apply_writes_only_long_term(monkeypatch, tmp_path) -> None:
     _write_calendar_fixture(tmp_path)
-    review_inputs = iter(["Please make the first task more specific", "通过"])
-    planning_calls: list[dict[str, object]] = []
 
-    async def fake_plan_daily_turn(**kwargs):
-        planning_calls.append(
-            {
-                "review_feedback_history": list(kwargs.get("review_feedback_history", [])),
-                "previous_draft": kwargs.get("previous_draft"),
-            }
-        )
-        if kwargs.get("review_feedback_history"):
-            return {
-                "status": "ready",
-                "message": "Revised draft is ready.",
-                "draft": {
-                    "intent": "daily_plan",
-                    "current_date": "2026-05-14",
-                    "focus_items": [
-                        {
-                            "checkpoint": "Existing checkpoint",
-                            "reason": "Updated after feedback.",
-                            "time_block": "- [ ] Existing checkpoint [startTime:: 09:00] [endTime:: 10:00]",
-                            "meu_candidates": [
-                                {
-                                    "action": "Draft the outline and first paragraph",
-                                    "expected_minutes": 45,
-                                    "verification": "An outline and one paragraph exist.",
-                                }
-                            ],
-                        }
-                    ],
-                },
-            }
-
+    async def fake_plan_long_term_reflect_turn(**kwargs):
         return {
             "status": "ready",
-            "message": "First draft is ready.",
+            "message": "Long-term urgency update is ready.",
             "draft": {
-                "intent": "daily_plan",
+                "intent": "long_term_reflect",
                 "current_date": "2026-05-14",
-                "focus_items": [
+                "revisions": [
                     {
-                        "checkpoint": "Existing checkpoint",
-                        "reason": "Initial version.",
-                        "time_block": "- [ ] Existing checkpoint [startTime:: 09:00] [endTime:: 10:00]",
-                        "meu_candidates": [
-                            {
-                                "action": "Push the core output",
-                                "expected_minutes": 60,
-                                "verification": "One artifact exists.",
-                            }
-                        ],
+                        "row_id": "3",
+                        "task": "Research / Camera ready",
+                        "current_e_level": "E2",
+                        "new_e_level": "E1",
+                        "note_append": "Camera ready entered final risk window.",
+                        "reason": "Deadline is close.",
                     }
                 ],
             },
         }
 
-    monkeypatch.setattr(graph_module, "plan_daily_turn", fake_plan_daily_turn)
-    monkeypatch.setattr("builtins.input", lambda prompt="": next(review_inputs))
+    monkeypatch.setattr(graph_module, "plan_long_term_reflect_turn", fake_plan_long_term_reflect_turn)
 
-    result = await run_workflow(
-        intent="daily_plan",
+    await run_workflow(
+        intent="long_term_reflect",
         current_date="2026-05-14",
         calendar_dir=tmp_path,
-        apply=False,
-        prompt_on_write=True,
+        apply=True,
+        prompt_on_write=False,
     )
 
-    daily_text = (tmp_path / "2026-05-14.md").read_text(encoding="utf-8")
-    assert "Draft the outline and first paragraph. Verify: An outline and one paragraph exist." in daily_text
-    assert len(planning_calls) == 2
-    assert planning_calls[1]["review_feedback_history"] == ["Please make the first task more specific"]
-    assert planning_calls[1]["previous_draft"] is not None
-    assert result["draft"]["focus_items"][0]["meu_candidates"][0]["action"] == "Draft the outline and first paragraph"
+    long_term_text = (tmp_path / "2026-05 Long-term.univer.md").read_text(encoding="utf-8")
+    assert '"E1"' in long_term_text
+    assert "Camera ready entered final risk window." in long_term_text
 
 
-async def test_run_workflow_returns_to_menu_from_review(monkeypatch, tmp_path) -> None:
+async def test_run_workflow_handles_daily_reflect_suggested_answers(monkeypatch, tmp_path) -> None:
     _write_calendar_fixture(tmp_path)
-
-    async def fake_plan_daily_turn(**kwargs):
-        return {
-            "status": "ready",
-            "message": "First draft is ready.",
-            "draft": {
-                "intent": "daily_plan",
-                "current_date": "2026-05-14",
-                "focus_items": [
-                    {
-                        "checkpoint": "Existing checkpoint",
-                        "reason": "Initial version.",
-                        "time_block": "- [ ] Existing checkpoint [startTime:: 09:00] [endTime:: 10:00]",
-                        "meu_candidates": [
-                            {
-                                "action": "Push the core output",
-                                "expected_minutes": 60,
-                                "verification": "One artifact exists.",
-                            }
-                        ],
-                    }
-                ],
-            },
-        }
-
-    monkeypatch.setattr(graph_module, "plan_daily_turn", fake_plan_daily_turn)
-    monkeypatch.setattr("builtins.input", lambda prompt="": "返回")
-
-    result = await run_workflow(
-        intent="daily_plan",
-        current_date="2026-05-14",
-        calendar_dir=tmp_path,
-        apply=False,
-        prompt_on_write=True,
-    )
-
-    assert result["return_to_menu"] is True
-    daily_text = (tmp_path / "2026-05-14.md").read_text(encoding="utf-8")
-    assert "Push the core output" not in daily_text
-
-
-async def test_run_workflow_handles_multi_turn_questions(monkeypatch, tmp_path) -> None:
-    _write_calendar_fixture(tmp_path)
-    answers = iter(["Finished the key draft revision."])
+    answers = iter(["2"])
 
     async def fake_plan_daily_reflect_turn(**kwargs):
         qa_history = kwargs["qa_history"]
         if not qa_history:
             return {
                 "status": "needs_input",
-                "message": "I need one missing fact.",
-                "question": "What was the most important progress today?",
+                "message": "Please confirm today's actual completion.",
+                "question": "Which answer fits best?",
+                "suggested_answers": ["Completed as planned.", "Partially completed.", "Mostly interrupted."],
             }
         return {
             "status": "ready",
@@ -304,7 +236,7 @@ async def test_run_workflow_handles_multi_turn_questions(monkeypatch, tmp_path) 
 
     monkeypatch.setattr(graph_module, "plan_daily_reflect_turn", fake_plan_daily_reflect_turn)
     monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
-    monkeypatch.setattr("agent.cli.build_thread_id", lambda **kwargs: "test-multi-turn")
+    monkeypatch.setattr("agent.cli.build_thread_id", lambda **kwargs: "test-daily-reflect")
 
     result = await run_workflow(
         intent="daily_reflect",
@@ -314,8 +246,8 @@ async def test_run_workflow_handles_multi_turn_questions(monkeypatch, tmp_path) 
         prompt_on_write=False,
     )
 
-    assert result["draft"]["reflect_lines"] == ["- Finished the key draft revision."]
-    assert result["qa_history"][0]["answer"] == "Finished the key draft revision."
+    assert result["qa_history"][0]["answer"] == "Partially completed."
+    assert result["draft"]["reflect_lines"] == ["- Partially completed."]
 
 
 async def test_run_text_command_opens_weekly_plan(monkeypatch, tmp_path) -> None:
@@ -334,12 +266,31 @@ async def test_run_text_command_opens_weekly_plan(monkeypatch, tmp_path) -> None
     assert "Existing checkpoint" in result["content"]
 
 
-async def test_run_interactive_session_can_switch_between_open_and_workflow(
+async def test_run_text_command_reflect_submenu_can_select_weekly(monkeypatch, tmp_path) -> None:
+    _write_calendar_fixture(tmp_path)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "2")
+
+    async def fake_run_workflow(**kwargs):
+        return {"intent": kwargs["intent"]}
+
+    monkeypatch.setattr("agent.cli.run_workflow", fake_run_workflow)
+
+    result = await run_text_command(
+        command_text="reflect",
+        current_date="2026-05-14",
+        calendar_dir=tmp_path,
+        apply=False,
+    )
+
+    assert result["intent"] == "weekly_reflect"
+
+
+async def test_run_interactive_session_can_switch_between_open_and_reflect_workflow(
     monkeypatch,
     tmp_path,
 ) -> None:
     _write_calendar_fixture(tmp_path)
-    inputs = iter(["open weekly plan", "", "", "daily plan", "", "exit"])
+    inputs = iter(["open weekly plan", "", "", "4", "2", "", "exit"])
     actions: list[str] = []
 
     async def fake_run_workflow(**kwargs):
@@ -357,4 +308,4 @@ async def test_run_interactive_session_can_switch_between_open_and_workflow(
 
     await run_interactive_session(calendar_dir=tmp_path, apply=False)
 
-    assert actions == ["open:weekly_plan", "daily_plan"]
+    assert actions == ["open:weekly_plan", "weekly_reflect"]

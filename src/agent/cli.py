@@ -19,37 +19,76 @@ from agent.calendar_writes import (
     apply_file_patches,
     build_daily_plan_patches,
     build_daily_reflect_patches,
+    build_long_term_reflect_patches,
     build_temp_plan_patches,
     build_weekly_plan_patches,
+    build_weekly_reflect_patches,
 )
 from agent.graph import Intent, graph
 
 DocumentTarget = Literal["weekly_plan", "daily_plan", "long_term"]
-CommandKind = Literal["workflow", "open_document", "help", "exit"]
+CommandKind = Literal["workflow", "open_document", "help", "exit", "reflect_menu"]
 
-MENU_OPTIONS: dict[str, tuple[str, Intent]] = {
+MENU_OPTIONS: dict[str, tuple[str, str]] = {
     "1": ("Weekly Plan", "weekly_plan"),
     "2": ("Temp Plan", "temp_plan"),
     "3": ("Daily Plan", "daily_plan"),
-    "4": ("Daily Reflect", "daily_reflect"),
+    "4": ("Reflect", "reflect_menu"),
+}
+REFLECT_MENU_OPTIONS: dict[str, tuple[str, Intent]] = {
+    "1": ("Daily Reflect", "daily_reflect"),
+    "2": ("Weekly Reflect", "weekly_reflect"),
+    "3": ("Long-term Reflect", "long_term_reflect"),
 }
 CANCEL_WORDS = {"exit", "quit", "cancel", "取消"}
 APPROVE_WORDS = {"通过", "pass", "approve", "approved", "ok", "yes", "y"}
 RETURN_MENU_WORDS = {"back", "menu", "return", "返回"}
 HELP_WORDS = {"help", "?", "帮助"}
 OPEN_WORDS = ("open", "show", "read", "view", "打开", "查看")
+REFLECT_MENU_ALIASES = ("reflect", "review", "复盘", "反思")
 
-WORKFLOW_ALIASES: dict[Intent, tuple[str, ...]] = {
-    "weekly_plan": ("weekly plan", "week plan", "weekly", "周计划", "本周计划"),
-    "temp_plan": ("temp plan", "temp", "临时计划", "临时任务"),
-    "daily_plan": ("daily plan", "today plan", "daily", "日计划", "今日计划", "今天计划"),
-    "daily_reflect": ("daily reflect", "daily review", "reflect", "日复盘", "今日复盘"),
-}
-DOCUMENT_ALIASES: dict[DocumentTarget, tuple[str, ...]] = {
-    "weekly_plan": ("weekly plan", "week plan", "weekly", "周计划"),
-    "daily_plan": ("daily plan", "today", "today plan", "daily", "日计划", "今日计划", "今天计划"),
-    "long_term": ("long term", "long-term", "longterm", "长期", "长期目标"),
-}
+WORKFLOW_ALIAS_ITEMS: list[tuple[str, Intent]] = [
+    ("long-term reflect", "long_term_reflect"),
+    ("long term reflect", "long_term_reflect"),
+    ("longterm reflect", "long_term_reflect"),
+    ("weekly reflect", "weekly_reflect"),
+    ("week reflect", "weekly_reflect"),
+    ("weekly review", "weekly_reflect"),
+    ("daily reflect", "daily_reflect"),
+    ("daily review", "daily_reflect"),
+    ("weekly plan", "weekly_plan"),
+    ("week plan", "weekly_plan"),
+    ("temp plan", "temp_plan"),
+    ("daily plan", "daily_plan"),
+    ("today plan", "daily_plan"),
+    ("周计划", "weekly_plan"),
+    ("本周计划", "weekly_plan"),
+    ("临时计划", "temp_plan"),
+    ("临时任务", "temp_plan"),
+    ("日计划", "daily_plan"),
+    ("今日计划", "daily_plan"),
+    ("今天计划", "daily_plan"),
+    ("日复盘", "daily_reflect"),
+    ("今日复盘", "daily_reflect"),
+    ("周复盘", "weekly_reflect"),
+    ("本周复盘", "weekly_reflect"),
+    ("长期复盘", "long_term_reflect"),
+]
+DOCUMENT_ALIAS_ITEMS: list[tuple[str, DocumentTarget]] = [
+    ("weekly plan", "weekly_plan"),
+    ("week plan", "weekly_plan"),
+    ("daily plan", "daily_plan"),
+    ("today plan", "daily_plan"),
+    ("long-term", "long_term"),
+    ("long term", "long_term"),
+    ("longterm", "long_term"),
+    ("周计划", "weekly_plan"),
+    ("日计划", "daily_plan"),
+    ("今日计划", "daily_plan"),
+    ("今天计划", "daily_plan"),
+    ("长期目标", "long_term"),
+    ("长期", "long_term"),
+]
 
 
 @dataclass(frozen=True)
@@ -66,7 +105,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the calendar planning workflows.")
     parser.add_argument(
         "--intent",
-        choices=[option[1] for option in MENU_OPTIONS.values()],
+        choices=[
+            "weekly_plan",
+            "temp_plan",
+            "daily_plan",
+            "daily_reflect",
+            "weekly_reflect",
+            "long_term_reflect",
+        ],
         help="Run a single workflow without showing the menu.",
     )
     parser.add_argument(
@@ -134,9 +180,12 @@ async def run_workflow(
         )
 
         sys.stdout.write(f"{result['response']}\n\n")
-        sys.stdout.write("Planned file updates:\n")
-        for patch in patches:
-            sys.stdout.write(f"- {patch.path}: {patch.summary}\n")
+        if patches:
+            sys.stdout.write("Planned file updates:\n")
+            for patch in patches:
+                sys.stdout.write(f"- {patch.path}: {patch.summary}\n")
+        else:
+            sys.stdout.write("Planned file updates:\n- No file change is required.\n")
 
         result["patches"] = patches
         result["thread_id"] = thread_id
@@ -211,10 +260,15 @@ def ask_llm_question(interrupt_payload: dict[str, Any]) -> str | None:
     message = str(interrupt_payload.get("message", "")).strip()
     question = str(interrupt_payload.get("question", "")).strip()
     turn = interrupt_payload.get("turn")
+    suggested_answers = interrupt_payload.get("suggested_answers") or []
 
     if message:
         sys.stdout.write(f"Assistant ({turn}): {message}\n")
     sys.stdout.write(f"Assistant ({turn}): {question}\n")
+    if suggested_answers:
+        sys.stdout.write("Suggested answers:\n")
+        for index, answer in enumerate(suggested_answers, start=1):
+            sys.stdout.write(f"{index}. {answer}\n")
 
     try:
         answer = input("You: ").strip()
@@ -225,6 +279,11 @@ def ask_llm_question(interrupt_payload: dict[str, Any]) -> str | None:
         return "__return_to_menu__"
     if answer.lower() in CANCEL_WORDS:
         return None
+
+    if suggested_answers and answer.isdigit():
+        index = int(answer) - 1
+        if 0 <= index < len(suggested_answers):
+            return str(suggested_answers[index])
     return answer
 
 
@@ -257,10 +316,24 @@ def build_patches(
             daily_plan=result["daily_plan"],
             draft=result["draft"],
         )
-    return build_daily_reflect_patches(
+    if intent == "daily_reflect":
+        return build_daily_reflect_patches(
+            calendar_dir=calendar_dir,
+            current_date=current_date,
+            daily_plan=result["daily_plan"],
+            draft=result["draft"],
+        )
+    if intent == "weekly_reflect":
+        return build_weekly_reflect_patches(
+            calendar_dir=calendar_dir,
+            current_date=current_date,
+            weekly_plan=result["weekly_plan"],
+            week_daily_plans=result["week_daily_plans"],
+            draft=result["draft"],
+        )
+    return build_long_term_reflect_patches(
         calendar_dir=calendar_dir,
         current_date=current_date,
-        daily_plan=result["daily_plan"],
         draft=result["draft"],
     )
 
@@ -274,7 +347,11 @@ def build_thread_id(*, intent: Intent, current_date: str, calendar_dir: Path) ->
         return f"temp:{current_date}"
     if intent == "daily_plan":
         return f"day:{current_date}"
-    return f"day_reflect:{current_date}"
+    if intent == "daily_reflect":
+        return f"day_reflect:{current_date}"
+    if intent == "weekly_reflect":
+        return f"week_reflect:{paths.week_start}"
+    return f"long_term:{current_date}"
 
 
 def build_review_thread_id(*, base_thread_id: str, review_round: int) -> str:
@@ -347,8 +424,13 @@ def parse_user_command(text: str) -> UserCommand | None:
         return UserCommand(kind="exit")
     if normalized in HELP_WORDS:
         return UserCommand(kind="help")
+    if normalized in {"4", *REFLECT_MENU_ALIASES}:
+        return UserCommand(kind="reflect_menu")
     if normalized in MENU_OPTIONS:
-        return UserCommand(kind="workflow", intent=MENU_OPTIONS[normalized][1])
+        action = MENU_OPTIONS[normalized][1]
+        if action == "reflect_menu":
+            return UserCommand(kind="reflect_menu")
+        return UserCommand(kind="workflow", intent=action)  # type: ignore[arg-type]
 
     if _contains_any(normalized, OPEN_WORDS):
         document = _match_document_target(normalized)
@@ -371,12 +453,13 @@ def choose_command(*, calendar_dir: Path | None = None) -> UserCommand:
         "1. Weekly Plan\n"
         "2. Temp Plan\n"
         "3. Daily Plan\n"
-        "4. Daily Reflect\n"
+        "4. Reflect\n"
         "You can also type commands like:\n"
         "- weekly plan\n"
+        "- daily reflect\n"
+        "- weekly reflect\n"
+        "- long-term reflect\n"
         "- open weekly plan\n"
-        "- open daily plan\n"
-        "- open long term\n"
         "Type `help` for examples or `exit` to quit.\n"
         "Choose: "
     )
@@ -391,6 +474,30 @@ def choose_command(*, calendar_dir: Path | None = None) -> UserCommand:
         )
 
 
+def choose_reflect_intent() -> Intent:
+    """Show the reflect submenu and return the selected reflect intent."""
+    prompt = (
+        "Reflect\n"
+        "1. Daily Reflect\n"
+        "2. Weekly Reflect\n"
+        "3. Long-term Reflect\n"
+        "Choose: "
+    )
+    while True:
+        choice = input(prompt).strip()
+        normalized = _normalize_user_text(choice)
+        if normalized in CANCEL_WORDS:
+            raise SystemExit(0)
+        if normalized in RETURN_MENU_WORDS:
+            raise _ReturnToMenu
+        if normalized in REFLECT_MENU_OPTIONS:
+            return REFLECT_MENU_OPTIONS[normalized][1]
+        intent = _match_workflow_intent(normalized)
+        if intent in {"daily_reflect", "weekly_reflect", "long_term_reflect"}:
+            return intent
+        sys.stdout.write("Unknown reflect option. Enter 1-3 or a reflect command.\n")
+
+
 def choose_intent(*, calendar_dir: Path | None = None) -> Intent:
     """Show the prompt requested by the user and return the chosen workflow."""
     while True:
@@ -400,6 +507,11 @@ def choose_intent(*, calendar_dir: Path | None = None) -> Intent:
         if command.kind == "help":
             sys.stdout.write(help_text())
             continue
+        if command.kind == "reflect_menu":
+            try:
+                return choose_reflect_intent()
+            except _ReturnToMenu:
+                continue
         if command.kind == "workflow" and command.intent is not None:
             return command.intent
         sys.stdout.write("This command is not a workflow. Try `weekly plan` or choose 1-4.\n")
@@ -465,9 +577,11 @@ def help_text() -> str:
         "- 1\n"
         "- weekly plan\n"
         "- daily reflect\n"
+        "- weekly reflect\n"
+        "- long-term reflect\n"
+        "- reflect\n"
         "- open weekly plan\n"
-        "- 打开weekly plan\n"
-        "- open long term\n"
+        "- 打开 weekly plan\n"
     )
 
 
@@ -482,7 +596,7 @@ async def run_text_command(
     command = parse_user_command(command_text)
     if command is None:
         raise SystemExit(
-            "Unknown command. Use a workflow like `weekly plan` or a file action like `open weekly plan`."
+            "Unknown command. Use a workflow like `weekly reflect` or a file action like `open weekly plan`."
         )
 
     if command.kind == "exit":
@@ -490,6 +604,11 @@ async def run_text_command(
     if command.kind == "help":
         sys.stdout.write(help_text())
         return {"help": True}
+    if command.kind == "reflect_menu":
+        try:
+            command = UserCommand(kind="workflow", intent=choose_reflect_intent())
+        except _ReturnToMenu:
+            return {"return_to_menu": True}
 
     resolved_date = current_date or get_default_current_date()
     if command.kind == "open_document" and command.document is not None:
@@ -525,6 +644,12 @@ async def run_interactive_session(*, calendar_dir: Path, apply: bool) -> None:
         if command.kind == "help":
             sys.stdout.write(help_text())
             continue
+
+        if command.kind == "reflect_menu":
+            try:
+                command = UserCommand(kind="workflow", intent=choose_reflect_intent())
+            except _ReturnToMenu:
+                continue
 
         current_date = prompt_for_date()
         if current_date is None:
@@ -568,17 +693,21 @@ def _contains_any(text: str, values: tuple[str, ...]) -> bool:
 
 
 def _match_workflow_intent(text: str) -> Intent | None:
-    for intent, aliases in WORKFLOW_ALIASES.items():
-        if any(alias in text for alias in aliases):
+    for alias, intent in sorted(WORKFLOW_ALIAS_ITEMS, key=lambda item: len(item[0]), reverse=True):
+        if alias in text:
             return intent
     return None
 
 
 def _match_document_target(text: str) -> DocumentTarget | None:
-    for document, aliases in DOCUMENT_ALIASES.items():
-        if any(alias in text for alias in aliases):
+    for alias, document in sorted(DOCUMENT_ALIAS_ITEMS, key=lambda item: len(item[0]), reverse=True):
+        if alias in text:
             return document
     return None
+
+
+class _ReturnToMenu(Exception):
+    """Internal signal used by the reflect submenu."""
 
 
 def main() -> None:

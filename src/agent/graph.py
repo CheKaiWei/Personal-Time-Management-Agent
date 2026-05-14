@@ -23,6 +23,9 @@ from agent.calendar_files import (
     DailyPlan,
     LongTermItem,
     WeeklyPlan,
+    build_week_dates,
+    default_daily_plan,
+    default_weekly_plan,
     parse_daily_plan,
     parse_long_term_items,
     parse_weekly_plan,
@@ -31,15 +34,26 @@ from agent.calendar_files import (
 from agent.planner import (
     format_daily_plan_response,
     format_daily_reflect_response,
+    format_long_term_reflect_response,
     format_temp_plan_response,
     format_weekly_plan_response,
+    format_weekly_reflect_response,
     plan_daily_reflect_turn,
     plan_daily_turn,
+    plan_long_term_reflect_turn,
     plan_temp_turn,
+    plan_weekly_reflect_turn,
     plan_weekly_turn,
 )
 
-Intent = Literal["weekly_plan", "temp_plan", "daily_plan", "daily_reflect"]
+Intent = Literal[
+    "weekly_plan",
+    "temp_plan",
+    "daily_plan",
+    "daily_reflect",
+    "weekly_reflect",
+    "long_term_reflect",
+]
 
 
 class State(TypedDict, total=False):
@@ -55,6 +69,7 @@ class State(TypedDict, total=False):
     long_term_items: list[LongTermItem]
     weekly_plan: WeeklyPlan
     daily_plan: DailyPlan
+    week_daily_plans: dict[str, DailyPlan]
     qa_history: list[dict[str, str]]
     review_feedback_history: list[str]
     previous_draft: dict[str, object]
@@ -83,8 +98,11 @@ def load_context(state: State) -> dict[str, object]:
         "previous_draft": state.get("previous_draft"),
     }
 
-    if intent == "weekly_plan":
+    if intent in {"weekly_plan", "long_term_reflect"}:
         updates["long_term_items"] = _load_long_term_items(paths.long_term_file)
+
+    if intent == "weekly_reflect":
+        updates["week_daily_plans"] = _load_week_daily_plans(calendar_dir, paths.week_start)
 
     return updates
 
@@ -164,6 +182,44 @@ async def daily_reflect(state: State) -> dict[str, object] | Command[str]:
     )
 
 
+async def weekly_reflect(state: State) -> dict[str, object] | Command[str]:
+    """Build a weekly adjustment draft from execution evidence so far."""
+    decision = await plan_weekly_reflect_turn(
+        current_date=state["current_date"],
+        week_start=state["week_start"],
+        weekly_plan=state["weekly_plan"],
+        week_daily_plans=state.get("week_daily_plans", {}),
+        qa_history=state.get("qa_history", []),
+        review_feedback_history=state.get("review_feedback_history", []),
+        previous_draft=state.get("previous_draft"),
+    )
+    return _handle_llm_decision(
+        state=state,
+        node_name="weekly_reflect",
+        decision=decision,
+        formatter=format_weekly_reflect_response,
+    )
+
+
+async def long_term_reflect(state: State) -> dict[str, object] | Command[str]:
+    """Build a long-term urgency update draft with strict write boundaries."""
+    decision = await plan_long_term_reflect_turn(
+        current_date=state["current_date"],
+        week_start=state["week_start"],
+        weekly_plan=state["weekly_plan"],
+        long_term_items=state.get("long_term_items", []),
+        qa_history=state.get("qa_history", []),
+        review_feedback_history=state.get("review_feedback_history", []),
+        previous_draft=state.get("previous_draft"),
+    )
+    return _handle_llm_decision(
+        state=state,
+        node_name="long_term_reflect",
+        decision=decision,
+        formatter=format_long_term_reflect_response,
+    )
+
+
 def _handle_llm_decision(
     *,
     state: State,
@@ -174,14 +230,16 @@ def _handle_llm_decision(
     qa_history = list(state.get("qa_history", []))
     if decision["status"] == "needs_input":
         question = str(decision["question"]).strip()
-        answer = interrupt(
-            {
-                "intent": state["intent"],
-                "message": str(decision.get("message", "")).strip(),
-                "question": question,
-                "turn": len(qa_history) + 1,
-            }
-        )
+        interrupt_payload: dict[str, object] = {
+            "intent": state["intent"],
+            "message": str(decision.get("message", "")).strip(),
+            "question": question,
+            "turn": len(qa_history) + 1,
+        }
+        suggested_answers = decision.get("suggested_answers")
+        if suggested_answers:
+            interrupt_payload["suggested_answers"] = suggested_answers
+        answer = interrupt(interrupt_payload)
         updated_history = [
             *qa_history,
             {"question": question, "answer": str(answer).strip()},
@@ -212,27 +270,21 @@ def _load_long_term_items(path: Path) -> list[LongTermItem]:
 
 def _load_weekly_plan(path: Path) -> WeeklyPlan:
     if not path.exists():
-        return WeeklyPlan(
-            checkpoints=[],
-            temp_tasks=[],
-            daily_links=[],
-            section_order=["Weekly Checkpoint", "Temp Tasks"],
-            sections={"Weekly Checkpoint": [], "Temp Tasks": []},
-        )
+        return default_weekly_plan()
     return parse_weekly_plan(path.read_text(encoding="utf-8"))
 
 
 def _load_daily_plan(path: Path) -> DailyPlan:
     if not path.exists():
-        return DailyPlan(
-            calendar=[],
-            tasks=[],
-            notes=[],
-            reflect=[],
-            section_order=["Calendar", "Tasks", "Notes", "Reflect"],
-            sections={"Calendar": [], "Tasks": [], "Notes": [], "Reflect": []},
-        )
+        return default_daily_plan()
     return parse_daily_plan(path.read_text(encoding="utf-8"))
+
+
+def _load_week_daily_plans(calendar_dir: Path, week_start: str) -> dict[str, DailyPlan]:
+    week_daily_plans: dict[str, DailyPlan] = {}
+    for day in build_week_dates(week_start):
+        week_daily_plans[day] = _load_daily_plan(calendar_dir / f"{day}.md")
+    return week_daily_plans
 
 
 def _build_local_checkpointer() -> InMemorySaver:
@@ -255,6 +307,8 @@ def _compile_graph(*, checkpointer: InMemorySaver | None = None):
         .add_node("temp_plan", temp_plan)
         .add_node("daily_plan", daily_plan)
         .add_node("daily_reflect", daily_reflect)
+        .add_node("weekly_reflect", weekly_reflect)
+        .add_node("long_term_reflect", long_term_reflect)
         .add_edge(START, "load_context")
         .add_conditional_edges(
             "load_context",
@@ -264,12 +318,16 @@ def _compile_graph(*, checkpointer: InMemorySaver | None = None):
                 "temp_plan": "temp_plan",
                 "daily_plan": "daily_plan",
                 "daily_reflect": "daily_reflect",
+                "weekly_reflect": "weekly_reflect",
+                "long_term_reflect": "long_term_reflect",
             },
         )
         .add_edge("weekly_plan", END)
         .add_edge("temp_plan", END)
         .add_edge("daily_plan", END)
         .add_edge("daily_reflect", END)
+        .add_edge("weekly_reflect", END)
+        .add_edge("long_term_reflect", END)
     )
 
     compile_kwargs: dict[str, object] = {"name": "Calendar Planning Graph"}

@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 LONG_TERM_COLUMNS = 10
+LONG_TERM_E_LEVEL_COLUMN = 5
+LONG_TERM_NOTES_COLUMN = 9
 
 
 @dataclass(frozen=True)
@@ -80,12 +82,18 @@ def resolve_calendar_paths(base_dir: Path, current_date: str) -> CalendarPaths:
     )
 
 
+def build_week_dates(week_start: str) -> list[str]:
+    """Return all seven dates in the week starting from Monday."""
+    start = date.fromisoformat(week_start)
+    return [(start + timedelta(days=offset)).isoformat() for offset in range(7)]
+
+
 def parse_weekly_plan(text: str) -> WeeklyPlan:
     """Parse the current weekly plan markdown file."""
     section_order, sections = split_markdown_sections(text)
     checkpoints = extract_checkbox_items(sections.get("Weekly Checkpoint", []))
     temp_tasks = extract_checkbox_items(sections.get("Temp Tasks", []))
-    daily_links = []
+    daily_links: list[str] = []
     for line in text.splitlines():
         match = re.search(r"\[\[(?P<link>[^\]]+)\]\]", line)
         if match:
@@ -120,7 +128,7 @@ def parse_daily_plan(text: str) -> DailyPlan:
 
 def parse_long_term_items(text: str) -> list[LongTermItem]:
     """Parse row records from a Univer long-term planning export."""
-    workbook = _extract_sheet_payload(text)
+    workbook = parse_long_term_workbook(text)
     sheet_id = workbook["sheetOrder"][0]
     cell_data = workbook["sheets"][sheet_id]["cellData"]
 
@@ -138,13 +146,11 @@ def parse_long_term_items(text: str) -> list[LongTermItem]:
 
         if project:
             current_project = project
-
         if not project:
             project = current_project
 
         if not task and not any(values[2:]):
             continue
-
         if task == "Tasks":
             continue
 
@@ -153,7 +159,7 @@ def parse_long_term_items(text: str) -> list[LongTermItem]:
                 row_id=str(row_index),
                 project=project,
                 task=task,
-                description=_clean_optional_text(values[2]),
+                description=_clean_optional_text(values[2]) or "",
                 status=_clean_optional_text(values[3]) or "",
                 p_level=_clean_optional_text(values[4]) or "",
                 e_level=_clean_optional_text(values[5]) or "",
@@ -165,6 +171,64 @@ def parse_long_term_items(text: str) -> list[LongTermItem]:
         )
 
     return items
+
+
+def parse_long_term_workbook(text: str) -> dict[str, Any]:
+    """Extract the raw workbook JSON from a long-term markdown export."""
+    match = re.search(r"```sheet\s*(?P<payload>\{.*?\})\s*```", text, re.DOTALL)
+    if not match:
+        raise ValueError("Long-term file is missing a ```sheet JSON block.")
+
+    payload = json.loads(match.group("payload"))
+    if not isinstance(payload, dict):
+        raise ValueError("Long-term sheet payload must be a JSON object.")
+    return payload
+
+
+def render_long_term_workbook(text: str, workbook: dict[str, Any]) -> str:
+    """Replace the main `sheet` payload while preserving the rest of the markdown file."""
+    if not isinstance(workbook, dict):
+        raise ValueError("Workbook must be a JSON object.")
+
+    replacement = "```sheet\n" + json.dumps(workbook, ensure_ascii=False) + "\n```"
+    updated_text, count = re.subn(
+        r"```sheet\s*\{.*?\}\s*```",
+        lambda _match: replacement,
+        text,
+        count=1,
+        flags=re.DOTALL,
+    )
+    if count != 1:
+        raise ValueError("Long-term file is missing a writable ```sheet JSON block.")
+    return updated_text
+
+
+def default_weekly_plan() -> WeeklyPlan:
+    """Return an empty weekly plan object with the standard sections."""
+    return WeeklyPlan(
+        checkpoints=[],
+        temp_tasks=[],
+        daily_links=[],
+        section_order=["Weekly Checkpoint", "Temp Tasks", "Daily Links", "Adjustment Log"],
+        sections={
+            "Weekly Checkpoint": [],
+            "Temp Tasks": [],
+            "Daily Links": [],
+            "Adjustment Log": [],
+        },
+    )
+
+
+def default_daily_plan() -> DailyPlan:
+    """Return an empty daily plan object with the standard sections."""
+    return DailyPlan(
+        calendar=[],
+        tasks=[],
+        notes=[],
+        reflect=[],
+        section_order=["Calendar", "Tasks", "Notes", "Reflect"],
+        sections={"Calendar": [], "Tasks": [], "Notes": [], "Reflect": []},
+    )
 
 
 def split_markdown_sections(text: str) -> tuple[list[str], dict[str, list[str]]]:
@@ -183,7 +247,6 @@ def split_markdown_sections(text: str) -> tuple[list[str], dict[str, list[str]]]
 
         if current_heading is None:
             continue
-
         sections[current_heading].append(raw_line.rstrip())
 
     return section_order, sections
@@ -217,17 +280,6 @@ def extract_checkbox_items(lines: list[str]) -> list[str]:
 def extract_non_empty_lines(lines: list[str]) -> list[str]:
     """Drop blank lines but preserve ordering and indentation."""
     return [line.rstrip() for line in lines if line.strip()]
-
-
-def _extract_sheet_payload(text: str) -> dict[str, Any]:
-    match = re.search(r"```sheet\s*(?P<payload>\{.*?\})\s*```", text, re.DOTALL)
-    if not match:
-        raise ValueError("Long-term file is missing a ```sheet JSON block.")
-
-    payload = json.loads(match.group("payload"))
-    if not isinstance(payload, dict):
-        raise ValueError("Long-term sheet payload must be a JSON object.")
-    return payload
 
 
 def _read_cell_value(cell: dict[str, Any] | None) -> Any:

@@ -10,7 +10,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
-from agent.calendar_files import DailyPlan, LongTermItem, WeeklyPlan
+from agent.calendar_files import DailyPlan, LongTermItem, WeeklyPlan, build_week_dates
 from agent.config import OpenAISettings, build_openai_client, resolve_openai_settings
 
 MAX_QA_TURNS = 3
@@ -253,8 +253,9 @@ Workflow: daily_reflect
 Goal: run a short daily reflection as multi-turn Q&A, then produce a concise summary.
 
 Rules:
+- If no prior user answer exists yet, you must first ask one concise question.
+- Every question must include 3-5 candidate answers that the user can choose from or edit.
 - You may ask follow-up questions to verify completion, blockers, and tomorrow's impact.
-- If the existing evidence is already enough, you may finalize immediately.
 - When asking, ask only one concise question at a time.
 - If review feedback exists, revise the previous draft to satisfy it unless it conflicts with the file context.
 - Final reflection should focus on: completed work, incomplete work, deviation reasons,
@@ -265,6 +266,7 @@ Return JSON with this shape:
   "status": "needs_input" | "ready",
   "message": "Chinese summary",
   "question": "Chinese question or empty string",
+  "suggested_answers": ["string"],
   "draft": {
     "reflect_lines": [
       "- string",
@@ -281,7 +283,166 @@ Return JSON with this shape:
         review_feedback_history=review_feedback_history or [],
         previous_draft=previous_draft,
     )
+    if not (qa_history or []) and decision.get("status") == "needs_input" and not decision.get("suggested_answers"):
+        fallback_question = build_daily_reflect_question(
+            current_date=current_date,
+            daily_plan=daily_plan,
+        )
+        decision["suggested_answers"] = fallback_question["suggested_answers"]
+    if not (qa_history or []) and decision.get("status") == "ready":
+        return build_daily_reflect_question(
+            current_date=current_date,
+            daily_plan=daily_plan,
+        )
     return _normalize_daily_reflect_decision(decision, fallback=fallback)
+
+
+async def plan_weekly_reflect_turn(
+    *,
+    current_date: str,
+    week_start: str,
+    weekly_plan: WeeklyPlan,
+    week_daily_plans: dict[str, DailyPlan],
+    qa_history: list[dict[str, str]] | None,
+    review_feedback_history: list[str] | None = None,
+    previous_draft: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Use the LLM to adjust the remaining schedule for this week."""
+    fallback = build_weekly_reflect_draft(
+        current_date=current_date,
+        week_start=week_start,
+        week_daily_plans=week_daily_plans,
+    )
+    context = {
+        "current_date": current_date,
+        "week_start": week_start,
+        "weekly_plan": _serialize_for_prompt(weekly_plan),
+        "executed_daily_plans": {
+            day: _serialize_for_prompt(plan)
+            for day, plan in week_daily_plans.items()
+            if day <= current_date
+        },
+        "future_daily_plans": {
+            day: _serialize_for_prompt(plan)
+            for day, plan in week_daily_plans.items()
+            if day > current_date
+        },
+    }
+    prompt = """
+Workflow: weekly_reflect
+Goal: review this week's executed work so far and decide whether the remaining days need schedule adjustments.
+
+Rules:
+- Read only this week: today and earlier days are evidence; later days are adjustable targets.
+- Do not modify past dates.
+- If future days should change, produce updated Calendar blocks for those future dates only.
+- Always produce at least one Adjustment Log line for the weekly plan file.
+- If no future adjustment is needed, keep `future_daily_adjustments` empty and explain that in the log.
+- If review feedback exists, revise the previous draft to satisfy it unless it conflicts with the file context.
+- Ask a concise clarifying question only if a future-day constraint is genuinely unclear.
+
+Return JSON with this shape:
+{
+  "status": "needs_input" | "ready",
+  "message": "Chinese summary",
+  "question": "Chinese question or empty string",
+  "draft": {
+    "adjustment_log_lines": [
+      "- YYYY-MM-DD: string"
+    ],
+    "future_daily_adjustments": [
+      {
+        "date": "YYYY-MM-DD",
+        "reason": "Chinese rationale",
+        "calendar_blocks": [
+          "- [ ] string [startTime:: HH:MM] [endTime:: HH:MM]"
+        ]
+      }
+    ]
+  }
+}
+""".strip()
+    decision = await _request_llm_decision(
+        workflow="weekly_reflect",
+        prompt=prompt,
+        context=context,
+        qa_history=qa_history or [],
+        review_feedback_history=review_feedback_history or [],
+        previous_draft=previous_draft,
+    )
+    return _normalize_weekly_reflect_decision(
+        decision,
+        fallback=fallback,
+        current_date=current_date,
+        valid_week_dates=set(build_week_dates(week_start)),
+    )
+
+
+async def plan_long_term_reflect_turn(
+    *,
+    current_date: str,
+    week_start: str,
+    weekly_plan: WeeklyPlan,
+    long_term_items: list[LongTermItem],
+    qa_history: list[dict[str, str]] | None,
+    review_feedback_history: list[str] | None = None,
+    previous_draft: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Use the LLM to revise only long-term urgency and notes."""
+    fallback = build_long_term_reflect_draft(
+        current_date=current_date,
+        long_term_items=long_term_items,
+    )
+    context = {
+        "current_date": current_date,
+        "week_start": week_start,
+        "weekly_plan": _serialize_for_prompt(weekly_plan),
+        "long_term_items": [_serialize_for_prompt(item) for item in long_term_items],
+    }
+    prompt = """
+Workflow: long_term_reflect
+Goal: use the current date, deadline distance, and weekly-plan pressure to revise only the long-term E level and notes.
+
+Rules:
+- The only allowed write targets are `e_level` and `note_append`.
+- Do not modify task names, project names, descriptions, status, P level, DDL, or hours.
+- `note_append` must be concise, evidence-based, and suitable for appending to the Notes column.
+- If nothing should change, return an empty `revisions` list.
+- If review feedback exists, revise the previous draft to satisfy it unless it conflicts with the file context.
+- Ask a concise clarifying question only if a high-stakes urgency tradeoff is genuinely unclear.
+
+Return JSON with this shape:
+{
+  "status": "needs_input" | "ready",
+  "message": "Chinese summary",
+  "question": "Chinese question or empty string",
+  "draft": {
+    "revisions": [
+      {
+        "row_id": "string",
+        "task": "string",
+        "current_e_level": "string",
+        "new_e_level": "string",
+        "note_append": "string",
+        "reason": "Chinese rationale"
+      }
+    ]
+  }
+}
+""".strip()
+    decision = await _request_llm_decision(
+        workflow="long_term_reflect",
+        prompt=prompt,
+        context=context,
+        qa_history=qa_history or [],
+        review_feedback_history=review_feedback_history or [],
+        previous_draft=previous_draft,
+    )
+    return _normalize_long_term_reflect_decision(
+        decision,
+        fallback=fallback,
+        long_term_items=long_term_items,
+    )
 
 
 def format_weekly_plan_response(
@@ -393,6 +554,58 @@ def format_daily_reflect_response(
         lines.append(f"Q&A turns: {len(qa_history)}")
     lines.append(f"Daily reflection draft for {draft['current_date']}:")
     lines.extend(draft["reflect_lines"])
+    return "\n".join(lines)
+
+
+def format_weekly_reflect_response(
+    draft: dict[str, Any],
+    llm_message: str = "",
+    qa_history: list[dict[str, str]] | None = None,
+) -> str:
+    """Render a concise weekly reflection preview."""
+    lines: list[str] = []
+    if llm_message:
+        lines.append(f"LLM Summary: {llm_message}")
+    if qa_history:
+        lines.append(f"Q&A turns: {len(qa_history)}")
+    lines.append(f"Weekly reflection draft for {draft['current_date']}:")
+    lines.append("Adjustment Log:")
+    lines.extend(draft["adjustment_log_lines"] or ["- No weekly adjustment log generated."])
+    if not draft["future_daily_adjustments"]:
+        lines.append("Future daily adjustments: none")
+        return "\n".join(lines)
+
+    lines.append("Future daily adjustments:")
+    for item in draft["future_daily_adjustments"]:
+        reason = f" | reason: {item['reason']}" if item.get("reason") else ""
+        lines.append(f"- {item['date']}{reason}")
+        lines.extend(f"  {block}" for block in item["calendar_blocks"])
+    return "\n".join(lines)
+
+
+def format_long_term_reflect_response(
+    draft: dict[str, Any],
+    llm_message: str = "",
+    qa_history: list[dict[str, str]] | None = None,
+) -> str:
+    """Render a concise long-term reflection preview."""
+    lines: list[str] = []
+    if llm_message:
+        lines.append(f"LLM Summary: {llm_message}")
+    if qa_history:
+        lines.append(f"Q&A turns: {len(qa_history)}")
+    lines.append(f"Long-term reflection draft for {draft['current_date']}:")
+    if not draft["revisions"]:
+        lines.append("No long-term revisions proposed.")
+        return "\n".join(lines)
+
+    for index, item in enumerate(draft["revisions"], start=1):
+        note_text = f" | note: {item['note_append']}" if item.get("note_append") else ""
+        reason = f" | reason: {item['reason']}" if item.get("reason") else ""
+        lines.append(
+            f"{index}. row={item['row_id']} | task={item['task']} | "
+            f"E: {item['current_e_level']} -> {item['new_e_level']}{note_text}{reason}"
+        )
     return "\n".join(lines)
 
 
@@ -525,6 +738,113 @@ def build_daily_reflect_draft(
         "intent": "daily_reflect",
         "current_date": current_date,
         "reflect_lines": reflect_lines,
+    }
+
+
+def build_daily_reflect_question(
+    *,
+    current_date: str,
+    daily_plan: DailyPlan,
+) -> dict[str, Any]:
+    """Create a deterministic first-turn daily reflection question."""
+    first_focus = _first_calendar_focus_text(daily_plan.calendar) or "today's main checkpoint"
+    completed_count = sum(1 for line in daily_plan.tasks if line.lstrip().startswith("- [x]"))
+    pending_count = sum(1 for line in daily_plan.tasks if line.lstrip().startswith("- [ ]"))
+    note_count = len(daily_plan.notes)
+
+    suggested_answers = [
+        f"已基本完成，核心推进的是 {first_focus}。",
+        f"部分完成，{first_focus} 还有收尾，当前大约完成一半到三分之二。",
+        "执行明显偏离计划，主要被临时事项或中断打断。",
+        "今天主要在补记录和澄清进度，实际完成情况还需要重新核对。",
+    ]
+    return {
+        "status": "needs_input",
+        "message": (
+            f"今天记录里有 {completed_count} 条已完成任务、{pending_count} 条未完成任务，"
+            f"以及 {note_count} 条笔记。先确认你的真实完成情况。"
+        ),
+        "question": "今天整体完成情况更接近下面哪一种？如果都不完全合适，也可以直接改写。",
+        "suggested_answers": suggested_answers,
+        "draft": {
+            "intent": "daily_reflect",
+            "current_date": current_date,
+            "reflect_lines": [],
+        },
+    }
+
+
+def build_weekly_reflect_draft(
+    *,
+    current_date: str,
+    week_start: str,
+    week_daily_plans: dict[str, DailyPlan],
+) -> dict[str, Any]:
+    """Create a deterministic fallback weekly reflection draft."""
+    future_adjustments = [
+        {
+            "date": day,
+            "reason": "",
+            "calendar_blocks": plan.calendar,
+        }
+        for day, plan in sorted(week_daily_plans.items())
+        if day > current_date and plan.calendar
+    ]
+    return {
+        "intent": "weekly_reflect",
+        "current_date": current_date,
+        "week_start": week_start,
+        "adjustment_log_lines": [
+            f"- {current_date}: reviewed this week's execution and kept the remaining schedule unchanged."
+        ],
+        "future_daily_adjustments": future_adjustments,
+    }
+
+
+def build_long_term_reflect_draft(
+    *,
+    current_date: str,
+    long_term_items: list[LongTermItem],
+) -> dict[str, Any]:
+    """Create a deterministic fallback long-term reflection draft."""
+    revisions: list[dict[str, Any]] = []
+    today = date.fromisoformat(current_date)
+
+    for item in long_term_items:
+        if not item.row_id or not item.task or not item.ddl or _is_done(item.status):
+            continue
+        try:
+            ddl = date.fromisoformat(item.ddl)
+        except ValueError:
+            continue
+
+        days_left = (ddl - today).days
+        new_e_level = item.e_level or "E3"
+        note_append = ""
+        if days_left <= 3:
+            new_e_level = "E1"
+            note_append = f"距离 DDL 仅剩 {days_left} 天，需要优先推进。"
+        elif days_left <= 7 and (item.e_level or "E9") != "E1":
+            new_e_level = "E2"
+            note_append = f"距离 DDL 仅剩 {days_left} 天，建议提高紧急度。"
+
+        if new_e_level == (item.e_level or "") and not note_append:
+            continue
+        revisions.append(
+            {
+                "row_id": item.row_id,
+                "task": _checkpoint_title(item),
+                "current_e_level": item.e_level,
+                "new_e_level": new_e_level,
+                "note_append": note_append,
+                "reason": "",
+            }
+        )
+
+    return {
+        "intent": "long_term_reflect",
+        "current_date": current_date,
+        "revisions": revisions,
     }
 
 
@@ -868,14 +1188,118 @@ def _normalize_daily_reflect_decision(
     }
 
 
+def _normalize_weekly_reflect_decision(
+    decision: dict[str, Any],
+    *,
+    fallback: dict[str, Any],
+    current_date: str,
+    valid_week_dates: set[str],
+) -> dict[str, Any]:
+    if decision.get("status") != "ready":
+        return _normalize_question_decision(decision)
+
+    raw_draft = decision.get("draft") or {}
+    raw_logs = raw_draft.get("adjustment_log_lines") or []
+    adjustment_log_lines = [
+        _normalize_reflect_line(line)
+        for line in raw_logs
+        if str(line).strip()
+    ]
+    if not adjustment_log_lines:
+        adjustment_log_lines = fallback["adjustment_log_lines"]
+
+    future_daily_adjustments: list[dict[str, Any]] = []
+    for raw_item in raw_draft.get("future_daily_adjustments") or []:
+        if not isinstance(raw_item, dict):
+            continue
+        target_date = str(raw_item.get("date", "")).strip()
+        if not target_date or target_date not in valid_week_dates or target_date <= current_date:
+            continue
+        calendar_blocks = [
+            str(block).strip()
+            for block in (raw_item.get("calendar_blocks") or [])
+            if str(block).strip()
+        ]
+        future_daily_adjustments.append(
+            {
+                "date": target_date,
+                "reason": str(raw_item.get("reason", "")).strip(),
+                "calendar_blocks": calendar_blocks,
+            }
+        )
+
+    if not future_daily_adjustments:
+        future_daily_adjustments = fallback["future_daily_adjustments"]
+
+    return {
+        "status": "ready",
+        "message": str(decision.get("message", "")).strip(),
+        "draft": {
+            **fallback,
+            "adjustment_log_lines": adjustment_log_lines,
+            "future_daily_adjustments": future_daily_adjustments,
+        },
+    }
+
+
+def _normalize_long_term_reflect_decision(
+    decision: dict[str, Any],
+    *,
+    fallback: dict[str, Any],
+    long_term_items: list[LongTermItem],
+) -> dict[str, Any]:
+    if decision.get("status") != "ready":
+        return _normalize_question_decision(decision)
+
+    row_lookup = {item.row_id: item for item in long_term_items}
+    revisions: list[dict[str, Any]] = []
+    for raw_item in (decision.get("draft") or {}).get("revisions") or []:
+        if not isinstance(raw_item, dict):
+            continue
+        row_id = str(raw_item.get("row_id", "")).strip()
+        source_item = row_lookup.get(row_id)
+        if source_item is None:
+            continue
+        new_e_level = str(raw_item.get("new_e_level") or source_item.e_level).strip().upper()
+        if not re.fullmatch(r"E\d+", new_e_level):
+            new_e_level = source_item.e_level
+        note_append = str(raw_item.get("note_append", "")).strip()
+        if new_e_level == source_item.e_level and not note_append:
+            continue
+        revisions.append(
+            {
+                "row_id": row_id,
+                "task": str(raw_item.get("task") or _checkpoint_title(source_item)).strip(),
+                "current_e_level": source_item.e_level,
+                "new_e_level": new_e_level,
+                "note_append": note_append,
+                "reason": str(raw_item.get("reason", "")).strip(),
+            }
+        )
+
+    if not revisions:
+        revisions = fallback["revisions"]
+
+    return {
+        "status": "ready",
+        "message": str(decision.get("message", "")).strip(),
+        "draft": {
+            **fallback,
+            "revisions": revisions,
+        },
+    }
+
+
 def _normalize_question_decision(decision: dict[str, Any]) -> dict[str, Any]:
     question = str(decision.get("question", "")).strip()
     if not question:
         raise RuntimeError("LLM requested more input but did not provide a question.")
+    suggested_answers = _normalize_suggested_answers(decision.get("suggested_answers"))
     return {
         "status": "needs_input",
         "message": str(decision.get("message", "")).strip(),
         "question": question,
+        "suggested_answers": suggested_answers,
     }
 
 
@@ -925,6 +1349,18 @@ def _normalize_reflect_line(line: Any) -> str:
     if not text:
         return text
     return text if text.startswith("- ") else f"- {text.lstrip('- ').strip()}"
+
+
+def _normalize_suggested_answers(raw_answers: Any) -> list[str]:
+    answers: list[str] = []
+    for raw_item in raw_answers or []:
+        text = str(raw_item).strip()
+        if not text or text in answers:
+            continue
+        answers.append(text)
+        if len(answers) >= 5:
+            break
+    return answers
 
 
 def _normalize_meu_candidates(
