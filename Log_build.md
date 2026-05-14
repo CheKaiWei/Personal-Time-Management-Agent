@@ -28,3 +28,23 @@
   - `uv run ruff check src/agent/calendar_files.py tests/unit_tests/test_calendar_files.py`
 - 结果：
   - 周计划文件路径已对齐需求文档与现有样例。
+
+## Step 3 - 建最小状态图与四个草案分支
+
+- 目标：先把控制流搭起来，严格区分 `weekly_plan / temp_plan / daily_plan / daily_reflect`，但这一步不落盘。
+- 修改：
+  - 重写 `src/agent/graph.py`
+  - 新增 `src/agent/planner.py`
+  - 重写 `tests/integration_tests/test_graph.py`
+  - 清理 `tests/unit_tests/test_configuration.py` 中旧聊天输入兼容测试
+- 设计：
+  - `load_context` 只解析日期和必要文件。
+  - `route_intent` 只负责路由，不混入规划逻辑。
+  - 四个节点都产出 `draft + response`，后续写入层再消费 `draft`。
+  - 规划先走确定性规则，避免测试依赖网络和模型。
+- 最小测试：
+  - `uv run python -m pytest tests/unit_tests/test_calendar_files.py tests/unit_tests/test_configuration.py tests/integration_tests/test_graph.py`
+  - `uv run ruff check src/agent/graph.py src/agent/planner.py tests/integration_tests/test_graph.py tests/unit_tests/test_configuration.py`
+- 结果：
+  - 4 条图分支都能成功返回草案。
+  - 图结构已从“对话模板”切换到“时间管理流程模板”。

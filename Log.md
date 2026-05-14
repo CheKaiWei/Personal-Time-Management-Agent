@@ -43,3 +43,10 @@
 
 结果补充：
 - 周计划路径现与样例命名一致，避免后续读写错位一日。
+
+4. 用最小 LangGraph 控制流替换原聊天节点：`load_context -> route_intent -> weekly/temp/daily/daily_reflect`。
+5. 新增 `src/agent/planner.py`，当前只生成草案和 CLI 可展示文本，不直接写文件。
+
+结果补充：
+- 四类 intent 已能读取 `calendar/` 样例并返回结构化草案。
+- 最小验证通过：`uv run python -m pytest tests/unit_tests/test_calendar_files.py tests/unit_tests/test_configuration.py tests/integration_tests/test_graph.py`

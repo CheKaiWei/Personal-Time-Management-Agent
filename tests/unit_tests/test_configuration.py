@@ -1,5 +1,4 @@
 from agent.config import DEFAULT_SYSTEM_PROMPT, get_openai_settings
-from agent.graph import _normalize_messages
 
 
 def test_get_openai_settings_falls_back_to_codex(monkeypatch, tmp_path) -> None:
@@ -51,9 +50,3 @@ def test_environment_values_override_codex(monkeypatch, tmp_path) -> None:
     assert settings.base_url == "https://env.example/v1"
     assert settings.model == "gpt-5.5"
     assert settings.system_prompt == "Respond in one line."
-
-
-def test_normalize_messages_supports_legacy_input() -> None:
-    assert _normalize_messages({"changeme": "hello"}) == [
-        {"role": "user", "content": "hello"}
-    ]
