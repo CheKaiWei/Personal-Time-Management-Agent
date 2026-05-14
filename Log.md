@@ -27,5 +27,14 @@
 - 验证结果：
   - `uv run python -m ruff check .`
   - `uv run python -m pytest`
-  - `langgraph dev` 成功启动
-  - `http://127.0.0.1:2024/docs` 返回 `200`
+- `langgraph dev` 成功启动
+- `http://127.0.0.1:2024/docs` 返回 `200`
+
+## 2026-05-14 Calendar Build
+
+1. 新增 `src/agent/calendar_files.py`，固化 `calendar/` 的三类文件契约：周计划、日计划、长期表。
+2. 先只做路径解析、Markdown section 拆分、Univer 表格行解析，不改图和 CLI。
+
+结果：
+- 已建立后续流程可复用的文件访问层。
+- 最小验证通过：`uv run python -m pytest tests/unit_tests/test_calendar_files.py`
