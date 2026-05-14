@@ -7,7 +7,11 @@ import asyncio
 import sys
 from datetime import date
 from pathlib import Path
+from typing import Any
 
+from langgraph.types import Command
+
+from agent.calendar_files import resolve_calendar_paths
 from agent.calendar_writes import (
     FilePatch,
     apply_file_patches,
@@ -24,6 +28,7 @@ MENU_OPTIONS: dict[str, tuple[str, Intent]] = {
     "3": ("Daily Plan", "daily_plan"),
     "4": ("Daily Reflect", "daily_reflect"),
 }
+CANCEL_WORDS = {"exit", "quit", "cancel"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -61,15 +66,28 @@ async def run_workflow(
     apply: bool,
     prompt_on_write: bool = True,
 ) -> dict[str, object]:
-    """Run one workflow, print a preview, and optionally write files."""
+    """Run one workflow, allow multi-turn Q&A, and optionally write files."""
     resolved_date = current_date or date.today().isoformat()
-    result = await graph.ainvoke(
-        {
-            "intent": intent,
-            "current_date": resolved_date,
-            "calendar_dir": str(calendar_dir),
-        }
-    )
+    thread_id = build_thread_id(intent=intent, current_date=resolved_date, calendar_dir=calendar_dir)
+    config = {"configurable": {"thread_id": thread_id}}
+    payload: dict[str, Any] | Command = {
+        "intent": intent,
+        "current_date": resolved_date,
+        "calendar_dir": str(calendar_dir),
+    }
+
+    while True:
+        result = await invoke_graph(payload, config)
+        interrupt_payload = extract_interrupt_payload(result)
+        if not interrupt_payload:
+            break
+
+        answer = ask_llm_question(interrupt_payload)
+        if answer is None:
+            sys.stdout.write("Workflow cancelled.\n")
+            return {"cancelled": True, "thread_id": thread_id}
+        payload = Command(resume=answer)
+
     patches = build_patches(
         intent=intent,
         current_date=resolved_date,
@@ -85,12 +103,48 @@ async def run_workflow(
     should_apply = apply or (prompt_on_write and confirm_apply())
     if should_apply:
         apply_file_patches(patches)
-        sys.stdout.write("已写入文件。\n")
+        sys.stdout.write("Files written.\n")
     else:
-        sys.stdout.write("未写入文件。\n")
+        sys.stdout.write("Files not written.\n")
 
     result["patches"] = patches
+    result["thread_id"] = thread_id
     return result
+
+
+async def invoke_graph(payload: dict[str, Any] | Command, config: dict[str, Any]) -> dict[str, Any]:
+    """Invoke the graph with state or a resume command."""
+    return await graph.ainvoke(payload, config)
+
+
+def extract_interrupt_payload(result: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the first interrupt payload if the graph paused for user input."""
+    interrupts = result.get("__interrupt__")
+    if not interrupts:
+        return None
+
+    interrupt = interrupts[0]
+    return interrupt.value if hasattr(interrupt, "value") else None
+
+
+def ask_llm_question(interrupt_payload: dict[str, Any]) -> str | None:
+    """Show an LLM question and collect the next user answer."""
+    message = str(interrupt_payload.get("message", "")).strip()
+    question = str(interrupt_payload.get("question", "")).strip()
+    turn = interrupt_payload.get("turn")
+
+    if message:
+        sys.stdout.write(f"Assistant ({turn}): {message}\n")
+    sys.stdout.write(f"Assistant ({turn}): {question}\n")
+
+    try:
+        answer = input("You: ").strip()
+    except EOFError:
+        return None
+
+    if answer.lower() in CANCEL_WORDS:
+        return None
+    return answer
 
 
 def build_patches(
@@ -130,9 +184,21 @@ def build_patches(
     )
 
 
+def build_thread_id(*, intent: Intent, current_date: str, calendar_dir: Path) -> str:
+    """Build a stable thread id for interrupt/resume."""
+    paths = resolve_calendar_paths(calendar_dir, current_date)
+    if intent == "weekly_plan":
+        return f"week:{paths.week_start}"
+    if intent == "temp_plan":
+        return f"temp:{current_date}"
+    if intent == "daily_plan":
+        return f"day:{current_date}"
+    return f"day_reflect:{current_date}"
+
+
 def confirm_apply() -> bool:
     """Ask whether to write the generated file patches."""
-    return input("是否写入这些文件？[y/N]: ").strip().lower() in {"y", "yes"}
+    return input("Write these file updates? [y/N]: ").strip().lower() in {"y", "yes"}
 
 
 def choose_intent() -> Intent:
@@ -148,13 +214,13 @@ def choose_intent() -> Intent:
     try:
         return MENU_OPTIONS[choice][1]
     except KeyError as error:
-        raise SystemExit("无效选项，请输入 1-4。") from error
+        raise SystemExit("Invalid option. Please enter 1-4.") from error
 
 
 def prompt_for_date() -> str:
     """Return the user-selected date, defaulting to today."""
     default_date = date.today().isoformat()
-    user_input = input(f"日期 (YYYY-MM-DD，默认 {default_date}): ").strip()
+    user_input = input(f"Date (YYYY-MM-DD, default {default_date}): ").strip()
     return user_input or default_date
 
 

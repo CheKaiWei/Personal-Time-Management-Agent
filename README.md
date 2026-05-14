@@ -1,82 +1,20 @@
 # Calendar Agent
 
-`calendar_agent` 是一个基于 LangGraph 的本地时间管理工作流工具。它不再是通用聊天模板，而是围绕同级目录 `../calendar/` 中的计划文件工作，提供 4 个可执行流程：
+`calendar_agent` is a LangGraph-based local planning workflow for the sibling
+`../calendar/` directory. It is not a generic chat bot. It reads planning files,
+uses an LLM to reason about the next action, can ask follow-up questions in
+multiple turns, and only writes files after showing a draft.
+
+## Workflows
+
+The CLI exposes four workflows:
 
 1. `Weekly Plan`
 2. `Temp Plan`
 3. `Daily Plan`
 4. `Daily Reflect`
 
-当前实现遵循“先读本地文件、生成草案、确认后写回”的最小闭环。规划逻辑是确定性的，本地测试不依赖网络。
-
-## 目录约定
-
-- 项目代码：`calendar_agent/`
-- 输入输出文档目录：`../calendar/`
-- 关键文件：
-  - `calendar/{YYYY-MM} Long-term.univer.md`
-  - `calendar/{week_start} Weekly Plan.md`
-  - `calendar/{date}.md`
-
-周起始日按周一计算。例如 `2026-05-14` 对应的周计划文件是 `calendar/2026-05-11 Weekly Plan.md`。
-
-## 当前工作流
-
-### 1. Weekly Plan
-
-- 读取当月长期目标表和本周周计划。
-- 选出 `3-5` 个优先 checkpoint 草案。
-- 补齐 `Daily Links`。
-- 为缺失的每日文件创建基础模板。
-
-### 2. Temp Plan
-
-- 读取周计划中的 `Temp Tasks`。
-- 对临时任务做基础分类、紧急度判断和是否应进入本周计划的标记。
-- 将结构化结果写回周计划的 `Temp Tasks` section。
-
-### 3. Daily Plan
-
-- 读取今天的日计划和本周周计划。
-- 选择今天唯一的 checkpoint。
-- 生成 `1-3` 个最小可执行单元（MEU）。
-- 回写 `Calendar` 和 `Tasks`，保留 `Notes` 与 `Reflect`。
-
-### 4. Daily Reflect
-
-- 读取今天的 `Calendar / Tasks / Notes / Reflect`。
-- 汇总时间块数量、任务完成数和备注数。
-- 回写 `Reflect`。
-
-## 安装
-
-在 `calendar_agent/` 目录下执行：
-
-```bash
-uv sync
-```
-
-如果你不用 `uv`，也可以：
-
-```bash
-pip install -e .
-```
-
-安装后会注册 CLI：
-
-```bash
-calendar-chat
-```
-
-## 交互式使用
-
-直接运行：
-
-```bash
-uv run calendar-chat
-```
-
-CLI 会显示：
+The menu is:
 
 ```text
 calendar-chat
@@ -88,101 +26,199 @@ calendar-chat
 请选择:
 ```
 
-随后会继续询问日期，并在写入前展示草案和待更新文件。
+## What Is LLM-Driven
 
-## 脚本化使用
+The following steps are now decided by the LLM, not by fixed keyword rules:
 
-为了便于自动化和测试，CLI 也支持跳过菜单：
+- `weekly_plan`: choose this week's `3-5` checkpoints
+- `temp_plan`: structure temporary tasks
+- `daily_plan`: choose today's single checkpoint and split it into `1-3` MEUs
+- `daily_reflect`: ask reflection questions and produce the final summary
+
+Each workflow can pause and ask the user a clarification question. The CLI then
+resumes the same LangGraph thread and continues planning. This allows multi-turn
+Q&A before the final draft is produced.
+
+## File Contract
+
+The project reads and writes these files in `../calendar/`:
+
+- `calendar/{YYYY-MM} Long-term.univer.md`
+- `calendar/{week_start} Weekly Plan.md`
+- `calendar/{date}.md`
+
+Week start is Monday. For example, `2026-05-14` maps to:
+
+- weekly file: `calendar/2026-05-11 Weekly Plan.md`
+- daily file: `calendar/2026-05-14.md`
+
+## Install
+
+From `calendar_agent/`:
 
 ```bash
-uv run calendar-chat --intent weekly_plan --date 2026-05-14 --calendar-dir ..\calendar
+uv sync
 ```
 
-如果你要直接写入文件：
+Or:
 
 ```bash
-uv run calendar-chat --intent weekly_plan --date 2026-05-14 --calendar-dir ..\calendar --apply
-uv run calendar-chat --intent temp_plan --date 2026-05-14 --calendar-dir ..\calendar --apply
-uv run calendar-chat --intent daily_plan --date 2026-05-14 --calendar-dir ..\calendar --apply
-uv run calendar-chat --intent daily_reflect --date 2026-05-14 --calendar-dir ..\calendar --apply
+pip install -e .
 ```
 
-`--apply` 会跳过确认，直接写回 `calendar/` 文件。
+## OpenAI Requirement
 
-## 文件写回规则
+The planning decisions now require an OpenAI-compatible model.
+
+Configuration priority:
+
+1. `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL`, `OPENAI_SYSTEM_PROMPT`
+2. `~/.codex/auth.json`
+3. `~/.codex/config.toml`
+
+If no API key is available, the LLM planning workflows will fail instead of
+silently falling back to rule-only behavior.
+
+## Running The CLI
+
+Recommended:
+
+```bash
+uv run python -m agent.cli
+```
+
+If you want to use `calendar-chat` directly in `Git Bash`, first activate the
+virtual environment:
+
+```bash
+source .venv/Scripts/activate
+calendar-chat
+```
+
+Or call the generated executable directly:
+
+```bash
+./.venv/Scripts/calendar-chat.exe
+```
+
+Note: on this Windows setup, `uv run calendar-chat` may hit a `uv trampoline`
+permission issue. Prefer `uv run python -m agent.cli`.
+
+## Non-Menu Usage
+
+You can skip the menu and call a specific workflow:
+
+```bash
+uv run python -m agent.cli --intent weekly_plan --date 2026-05-14 --calendar-dir ..\calendar
+```
+
+Write changes immediately:
+
+```bash
+uv run python -m agent.cli --intent weekly_plan --date 2026-05-14 --calendar-dir ..\calendar --apply
+uv run python -m agent.cli --intent temp_plan --date 2026-05-14 --calendar-dir ..\calendar --apply
+uv run python -m agent.cli --intent daily_plan --date 2026-05-14 --calendar-dir ..\calendar --apply
+uv run python -m agent.cli --intent daily_reflect --date 2026-05-14 --calendar-dir ..\calendar --apply
+```
+
+`--apply` skips the final write confirmation. It does not skip LLM follow-up
+questions. If the LLM needs clarification, the CLI still asks the user.
+
+## Multi-Turn Q&A Flow
+
+Each workflow follows this pattern:
+
+1. Read the relevant `calendar/` files.
+2. Ask the LLM for a planning decision.
+3. If the LLM needs more context, pause and ask one question.
+4. Resume the same LangGraph thread with the user's answer.
+5. Repeat until the LLM returns a final draft.
+6. Show the draft and planned file updates.
+7. Optionally write the files.
+
+Type `exit`, `quit`, or `cancel` at a follow-up question to stop the workflow.
+
+## What Gets Written
 
 ### Weekly Plan
 
-会维护这些 section：
+Maintains:
 
 - `# Weekly Checkpoint`
 - `# Temp Tasks`
 - `# Daily Links`
 - `# Adjustment Log`
 
+Also creates missing daily templates for the week.
+
+### Temp Plan
+
+Rewrites the `# Temp Tasks` section using structured output from the LLM.
+
 ### Daily Plan
 
-会维护这些 section：
+Maintains:
 
 - `# Calendar`
 - `# Tasks`
 - `# Notes`
 - `# Reflect`
 
-其中：
+Only rewrites:
 
-- `Daily Plan` 只重写 `Calendar / Tasks`
-- `Daily Reflect` 只重写 `Reflect`
+- `Calendar`
+- `Tasks`
 
-## 开发说明
+### Daily Reflect
 
-核心模块：
+Only rewrites:
+
+- `Reflect`
+
+## Code Layout
 
 - `src/agent/calendar_files.py`
-  - 路径解析
-  - Markdown section 解析
-  - Univer 长期目标表解析
+  - path resolution
+  - markdown section parsing
+  - Univer long-term table parsing
 - `src/agent/planner.py`
-  - 四类工作流草案生成
-- `src/agent/calendar_writes.py`
-  - 草案转文件补丁
-  - 文件落盘
+  - LLM prompts
+  - multi-turn planning decisions
+  - draft normalization
 - `src/agent/graph.py`
-  - LangGraph 状态图
+  - LangGraph workflow
+  - interrupt/resume loop
+- `src/agent/calendar_writes.py`
+  - file patch generation
+  - writing files
 - `src/agent/cli.py`
-  - 菜单与命令行入口
+  - menu CLI
+  - multi-turn user interaction
 
-## 测试
+## Testing
 
-运行全部测试：
+Run all tests:
 
 ```bash
 uv run python -m pytest
 ```
 
-运行静态检查：
+Run lint:
 
 ```bash
 uv run ruff check .
 ```
 
-## 典型结果
+The test suite mocks the LLM planning turns, verifies interrupt/resume behavior,
+and keeps file writes deterministic.
 
-执行 `Weekly Plan` 后，通常会看到：
+## Minimal Real Check
 
-- 本周 checkpoint 草案
-- `Temp Tasks` 摘要
-- 将要更新的周计划文件
-- 将要创建的缺失日计划模板
+One real dry-run used during development:
 
-执行 `Daily Plan` 后，通常会看到：
+```bash
+uv run python -m agent.cli --intent temp_plan --date 2026-05-14 --calendar-dir ..\calendar
+```
 
-- 今日唯一 checkpoint
-- `1-3` 个 MEU
-- 将要更新的 `Calendar` 和 `Tasks`
-
-执行 `Daily Reflect` 后，通常会看到：
-
-- 时间块数量
-- 任务完成/未完成概览
-- 将要写回的 `Reflect` 内容
+This confirmed that the graph now performs an actual OpenAI call instead of
+always staying inside deterministic local rules.

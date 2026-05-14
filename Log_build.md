@@ -95,3 +95,36 @@
 - 结果：
   - 项目已从模板聊天 CLI 切换到时间管理菜单 CLI。
   - README 已覆盖安装、运行、脚本模式、文件规则和测试说明。
+
+## Step 6 - Restore LLM Decisions And Multi-Turn Q&A
+
+- Goal:
+  - align the implementation with the original design document
+  - let the LLM make the four core planning decisions
+  - allow multi-turn clarification before finalizing a draft
+- Changes:
+  - rewrote `src/agent/planner.py` into an LLM-driven planning layer
+  - updated `src/agent/graph.py` to use `interrupt()` and `Command(resume=...)`
+  - compiled the graph with `InMemorySaver`
+  - updated `src/agent/cli.py` to loop through LLM follow-up questions
+  - rewrote `tests/integration_tests/test_graph.py`
+  - rewrote `tests/unit_tests/test_cli.py`
+  - rewrote `README.md`
+- Design:
+  - LLM owns:
+    - weekly checkpoint selection
+    - temp task structuring
+    - daily checkpoint + MEU selection
+    - daily reflection Q&A and summary
+  - deterministic code still owns:
+    - file parsing
+    - file patches
+    - final markdown writes
+    - fallback normalization for malformed LLM output
+- Validation:
+  - `uv run python -m pytest`
+  - `uv run ruff check .`
+  - real dry-run through the graph using `temp_plan`
+- Result:
+  - the project is now LLM-driven at the planning layer
+  - multi-turn Q&A works through LangGraph pause/resume instead of ad-hoc CLI loops

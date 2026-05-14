@@ -15,7 +15,7 @@ from openai import AsyncOpenAI
 DEFAULT_SYSTEM_PROMPT = (
     "You are a concise calendar assistant. Answer clearly and keep replies practical."
 )
-DEFAULT_MODEL = "gpt-5.4"
+DEFAULT_MODEL = "gpt-5.4-mini"
 
 
 @dataclass(frozen=True)

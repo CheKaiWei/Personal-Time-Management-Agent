@@ -75,3 +75,38 @@
 - 全量验证通过：
   - `uv run python -m pytest`
   - `uv run ruff check .`
+
+## 2026-05-14 CLI 启动说明补充
+
+1. 用户在 `Git Bash` 中直接执行 `calendar-chat` 报 `command not found`。
+2. 定位结果：脚本已安装到 `calendar_agent/.venv/Scripts/calendar-chat.exe`，但当前 shell 未激活虚拟环境。
+3. 同时验证到当前环境下 `uv run calendar-chat` 会触发 `uv trampoline` 权限问题，因此 README 改为优先推荐：
+   - `uv run python -m agent.cli`
+   - 或先 `source .venv/Scripts/activate` 再执行 `calendar-chat`
+
+## 2026-05-14 LLM Planning Upgrade
+
+1. Replaced the deterministic planning decisions in `weekly_plan`, `temp_plan`,
+   `daily_plan`, and `daily_reflect` with OpenAI-backed planning turns.
+2. Added LangGraph `interrupt`/`resume` support with `InMemorySaver`, so each
+   workflow can ask follow-up questions and continue in the same thread.
+3. Kept file writes deterministic: the LLM chooses the plan, while
+   `calendar_writes.py` still owns concrete markdown updates.
+4. Updated the CLI to run multi-turn Q&A before previewing file patches.
+5. Rewrote tests to mock LLM turns and verify interrupt/resume behavior.
+
+Result:
+- The agent now uses an LLM for the four core planning actions.
+- Multi-turn Q&A is supported in the CLI.
+- Verified:
+  - `uv run python -m pytest`
+  - `uv run ruff check .`
+  - real dry-run: `temp_plan` hit the OpenAI-backed graph successfully
+
+## 2026-05-14 Default Model Change
+
+1. Changed the default OpenAI model from `gpt-5.4` to `gpt-5.4-mini`.
+2. Kept `OPENAI_MODEL` override behavior unchanged, so runtime env config still wins.
+
+Result:
+- The agent now defaults to the smaller and faster model unless an explicit model is configured.

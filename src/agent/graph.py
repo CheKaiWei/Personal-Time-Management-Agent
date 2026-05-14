@@ -1,13 +1,16 @@
-"""LangGraph workflow for deterministic calendar planning."""
+"""LangGraph workflow for LLM-driven calendar planning."""
 
 from __future__ import annotations
 
 import sys
 from datetime import date
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
 from typing_extensions import TypedDict
 
 if __package__ in {None, ""}:
@@ -26,14 +29,14 @@ from agent.calendar_files import (
     resolve_calendar_paths,
 )
 from agent.planner import (
-    build_daily_plan_draft,
-    build_daily_reflect_draft,
-    build_temp_plan_draft,
-    build_weekly_plan_draft,
     format_daily_plan_response,
     format_daily_reflect_response,
     format_temp_plan_response,
     format_weekly_plan_response,
+    plan_daily_reflect_turn,
+    plan_daily_turn,
+    plan_temp_turn,
+    plan_weekly_turn,
 )
 
 Intent = Literal["weekly_plan", "temp_plan", "daily_plan", "daily_reflect"]
@@ -52,6 +55,7 @@ class State(TypedDict, total=False):
     long_term_items: list[LongTermItem]
     weekly_plan: WeeklyPlan
     daily_plan: DailyPlan
+    qa_history: list[dict[str, str]]
     draft: dict[str, object]
     response: str
 
@@ -72,6 +76,7 @@ def load_context(state: State) -> dict[str, object]:
         "daily_plan_file": str(paths.daily_plan_file),
         "weekly_plan": _load_weekly_plan(paths.weekly_plan_file),
         "daily_plan": _load_daily_plan(paths.daily_plan_file),
+        "qa_history": state.get("qa_history", []),
     }
 
     if intent == "weekly_plan":
@@ -85,51 +90,101 @@ def route_intent(state: State) -> Intent:
     return state["intent"]
 
 
-def weekly_plan(state: State) -> dict[str, object]:
-    """Build a weekly plan preview without writing files."""
-    draft = build_weekly_plan_draft(
+async def weekly_plan(state: State) -> dict[str, object] | Command[str]:
+    """Build a weekly plan draft with LLM-driven clarification when needed."""
+    decision = await plan_weekly_turn(
         current_date=state["current_date"],
         week_start=state["week_start"],
         long_term_items=state.get("long_term_items", []),
         weekly_plan=state["weekly_plan"],
+        qa_history=state.get("qa_history", []),
     )
-    return {
-        "draft": draft,
-        "response": format_weekly_plan_response(draft),
-    }
+    return _handle_llm_decision(
+        state=state,
+        node_name="weekly_plan",
+        decision=decision,
+        formatter=format_weekly_plan_response,
+    )
 
 
-def temp_plan(state: State) -> dict[str, object]:
-    """Build a temp task structuring preview without writing files."""
-    draft = build_temp_plan_draft(state["weekly_plan"])
-    return {
-        "draft": draft,
-        "response": format_temp_plan_response(draft),
-    }
+async def temp_plan(state: State) -> dict[str, object] | Command[str]:
+    """Build a temp task structuring draft with LLM-driven clarification."""
+    decision = await plan_temp_turn(
+        weekly_plan=state["weekly_plan"],
+        qa_history=state.get("qa_history", []),
+    )
+    return _handle_llm_decision(
+        state=state,
+        node_name="temp_plan",
+        decision=decision,
+        formatter=format_temp_plan_response,
+    )
 
 
-def daily_plan(state: State) -> dict[str, object]:
-    """Build a daily plan preview without writing files."""
-    draft = build_daily_plan_draft(
+async def daily_plan(state: State) -> dict[str, object] | Command[str]:
+    """Build a daily plan draft with LLM-driven clarification."""
+    decision = await plan_daily_turn(
         current_date=state["current_date"],
         weekly_plan=state["weekly_plan"],
         daily_plan=state["daily_plan"],
+        qa_history=state.get("qa_history", []),
     )
-    return {
-        "draft": draft,
-        "response": format_daily_plan_response(draft),
-    }
+    return _handle_llm_decision(
+        state=state,
+        node_name="daily_plan",
+        decision=decision,
+        formatter=format_daily_plan_response,
+    )
 
 
-def daily_reflect(state: State) -> dict[str, object]:
-    """Build a daily reflection preview without writing files."""
-    draft = build_daily_reflect_draft(
+async def daily_reflect(state: State) -> dict[str, object] | Command[str]:
+    """Build a daily reflection draft with LLM-driven clarification."""
+    decision = await plan_daily_reflect_turn(
         current_date=state["current_date"],
         daily_plan=state["daily_plan"],
+        qa_history=state.get("qa_history", []),
     )
+    return _handle_llm_decision(
+        state=state,
+        node_name="daily_reflect",
+        decision=decision,
+        formatter=format_daily_reflect_response,
+    )
+
+
+def _handle_llm_decision(
+    *,
+    state: State,
+    node_name: str,
+    decision: dict[str, Any],
+    formatter,
+) -> dict[str, object] | Command[str]:
+    qa_history = list(state.get("qa_history", []))
+    if decision["status"] == "needs_input":
+        question = str(decision["question"]).strip()
+        answer = interrupt(
+            {
+                "intent": state["intent"],
+                "message": str(decision.get("message", "")).strip(),
+                "question": question,
+                "turn": len(qa_history) + 1,
+            }
+        )
+        updated_history = [
+            *qa_history,
+            {"question": question, "answer": str(answer).strip()},
+        ]
+        return Command(update={"qa_history": updated_history}, goto=node_name)
+
+    draft = decision["draft"]
     return {
         "draft": draft,
-        "response": format_daily_reflect_response(draft),
+        "response": formatter(
+            draft,
+            str(decision.get("message", "")).strip(),
+            qa_history,
+        ),
+        "qa_history": qa_history,
     }
 
 
@@ -190,5 +245,16 @@ graph = (
     .add_edge("temp_plan", END)
     .add_edge("daily_plan", END)
     .add_edge("daily_reflect", END)
-    .compile(name="Calendar Planning Graph")
+    .compile(
+        name="Calendar Planning Graph",
+        checkpointer=InMemorySaver(
+            serde=JsonPlusSerializer(
+                allowed_msgpack_modules=(
+                    ("agent.calendar_files", "DailyPlan"),
+                    ("agent.calendar_files", "LongTermItem"),
+                    ("agent.calendar_files", "WeeklyPlan"),
+                )
+            )
+        ),
+    )
 )
