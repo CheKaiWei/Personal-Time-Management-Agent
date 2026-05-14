@@ -56,3 +56,22 @@
 结果补充：
 - 周计划可创建缺失的日计划模板。
 - Temp / Daily / Reflect 三类更新已能稳定改写对应 section。
+
+7. 将 `calendar-chat` 改为菜单式 CLI，并补充 `--intent/--apply` 脚本模式。
+8. 重写 `README.md`，补齐使用方式、文件契约、脚本化示例和测试方法。
+9. 用真实 `../calendar` 演示并写回：
+   - `2026-05-11 Weekly Plan.md`
+   - `2026-05-13.md`
+   - `2026-05-14.md`
+   - `2026-05-16.md`
+
+最终结果：
+- 交互入口已变为：
+  - `calendar-chat`
+  - `1. Weekly Plan`
+  - `2. Temp Plan`
+  - `3. Daily Plan`
+  - `4. Daily Reflect`
+- 全量验证通过：
+  - `uv run python -m pytest`
+  - `uv run ruff check .`

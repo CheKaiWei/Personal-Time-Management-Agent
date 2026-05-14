@@ -95,6 +95,41 @@ async def test_daily_plan_route_returns_checkpoint_and_meus(tmp_path) -> None:
     assert "今日 checkpoint" in result["response"]
 
 
+async def test_daily_plan_prefers_existing_calendar_checkpoint(tmp_path) -> None:
+    (tmp_path / "2026-05-11 Weekly Plan.md").write_text(
+        """
+# Weekly Checkpoint
+- [ ] Weekly checkpoint
+
+# Temp Tasks
+""".strip(),
+        encoding="utf-8",
+    )
+    (tmp_path / "2026-05-14.md").write_text(
+        """
+# Calendar
+- [ ] Calendar checkpoint [startTime:: 09:00] [endTime:: 10:00]
+
+# Tasks
+
+# Notes
+
+# Reflect
+""".strip(),
+        encoding="utf-8",
+    )
+
+    result = await graph.ainvoke(
+        {
+            "intent": "daily_plan",
+            "current_date": "2026-05-14",
+            "calendar_dir": str(tmp_path),
+        }
+    )
+
+    assert result["draft"]["checkpoint"] == "Calendar checkpoint"
+
+
 async def test_daily_reflect_route_returns_summary(tmp_path) -> None:
     _write_calendar_fixture(tmp_path)
 
@@ -108,4 +143,5 @@ async def test_daily_reflect_route_returns_summary(tmp_path) -> None:
 
     assert result["draft"]["intent"] == "daily_reflect"
     assert any("安排 1 个时间块" in line for line in result["draft"]["reflect_lines"])
+    assert result["draft"]["reflect_lines"][-1].endswith("Existing checkpoint。")
     assert "已生成日复盘草案" in result["response"]

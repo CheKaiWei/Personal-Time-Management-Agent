@@ -108,7 +108,13 @@ def build_daily_plan_draft(
     daily_plan: DailyPlan,
 ) -> dict[str, Any]:
     """Create a daily plan draft from weekly goals and today's file."""
-    checkpoint = weekly_plan.checkpoints[0] if weekly_plan.checkpoints else "补充今天的唯一 checkpoint"
+    checkpoint = _first_checkbox_text(daily_plan.calendar)
+    if not checkpoint:
+        checkpoint = (
+            weekly_plan.checkpoints[0]
+            if weekly_plan.checkpoints
+            else "补充今天的唯一 checkpoint"
+        )
     calendar_blocks = daily_plan.calendar or [
         f"- [ ] {checkpoint} [startTime:: 09:00] [endTime:: 10:30]",
         f"- [ ] {checkpoint} [startTime:: 14:00] [endTime:: 15:00]",
@@ -258,5 +264,8 @@ def _first_checkbox_text(lines: list[str]) -> str | None:
     for line in lines:
         match = re.match(r"^\s*-\s*\[[ xX]\]\s*(?P<item>.+?)\s*$", line)
         if match:
-            return match.group("item")
+            item = match.group("item")
+            item = re.sub(r"\s*\[startTime:: [^\]]+\]", "", item)
+            item = re.sub(r"\s*\[endTime:: [^\]]+\]", "", item)
+            return item.strip()
     return None

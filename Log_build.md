@@ -65,3 +65,33 @@
   - `uv run ruff check src/agent/calendar_writes.py tests/unit_tests/test_calendar_writes.py`
 - 结果：
   - 四类写入补丁都能在临时目录成功应用。
+
+## Step 5 - 菜单 CLI、README 与真实文件演示
+
+- 目标：把用户入口切到最终期望的 `calendar-chat` 菜单，并用真实 `calendar/` 做一次端到端写回。
+- 修改：
+  - 重写 `src/agent/cli.py`
+  - 新增 `tests/unit_tests/test_cli.py`
+  - 重写 `README.md`
+  - 调整 `src/agent/planner.py`，使 `Daily Plan` 优先对齐已有 `Calendar` 时间块
+  - 扩展 `tests/integration_tests/test_graph.py` 覆盖该对齐逻辑
+- 设计：
+  - CLI 默认走交互菜单，满足最终展示要求。
+  - `--intent` + `--apply` 保留给测试、脚本和批量演示。
+  - `Daily Plan` 若当天已存在时间块，则优先用首个时间块对应 checkpoint 生成 `Tasks`，避免 `Calendar` 与 `Tasks` 脱节。
+- 最小测试：
+  - `uv run python -m pytest`
+  - `uv run ruff check .`
+- 真实演示：
+  - `uv run python -m agent.cli --intent weekly_plan --date 2026-05-14 --calendar-dir ..\\calendar --apply`
+  - `uv run python -m agent.cli --intent temp_plan --date 2026-05-14 --calendar-dir ..\\calendar --apply`
+  - `uv run python -m agent.cli --intent daily_plan --date 2026-05-14 --calendar-dir ..\\calendar --apply`
+  - `uv run python -m agent.cli --intent daily_reflect --date 2026-05-14 --calendar-dir ..\\calendar --apply`
+- 真实写回结果：
+  - 更新 `../calendar/2026-05-11 Weekly Plan.md`
+  - 创建 `../calendar/2026-05-13.md`
+  - 更新 `../calendar/2026-05-14.md`
+  - 创建 `../calendar/2026-05-16.md`
+- 结果：
+  - 项目已从模板聊天 CLI 切换到时间管理菜单 CLI。
+  - README 已覆盖安装、运行、脚本模式、文件规则和测试说明。
