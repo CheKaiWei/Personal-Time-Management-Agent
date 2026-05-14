@@ -48,3 +48,20 @@
 - 结果：
   - 4 条图分支都能成功返回草案。
   - 图结构已从“对话模板”切换到“时间管理流程模板”。
+
+## Step 4 - 建补丁与写回层
+
+- 目标：让四类草案可以独立转成文件补丁，并在不依赖 CLI 的情况下完成落盘测试。
+- 修改：
+  - 新增 `src/agent/calendar_writes.py`
+  - 新增 `tests/unit_tests/test_calendar_writes.py`
+- 设计：
+  - 用 `FilePatch` 表达单文件更新。
+  - Weekly Plan 会补齐 `Daily Links` 和缺失的日计划模板。
+  - Daily Plan 只改 `Calendar / Tasks`，保留 `Notes / Reflect`。
+  - Daily Reflect 只改 `Reflect`。
+- 最小测试：
+  - `uv run python -m pytest tests/unit_tests/test_calendar_writes.py`
+  - `uv run ruff check src/agent/calendar_writes.py tests/unit_tests/test_calendar_writes.py`
+- 结果：
+  - 四类写入补丁都能在临时目录成功应用。

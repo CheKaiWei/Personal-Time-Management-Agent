@@ -50,3 +50,9 @@
 结果补充：
 - 四类 intent 已能读取 `calendar/` 样例并返回结构化草案。
 - 最小验证通过：`uv run python -m pytest tests/unit_tests/test_calendar_files.py tests/unit_tests/test_configuration.py tests/integration_tests/test_graph.py`
+
+6. 新增 `src/agent/calendar_writes.py`，把四类草案转成具体文件补丁并落盘。
+
+结果补充：
+- 周计划可创建缺失的日计划模板。
+- Temp / Daily / Reflect 三类更新已能稳定改写对应 section。
