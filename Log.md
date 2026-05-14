@@ -137,3 +137,27 @@ Result:
 - Verified:
   - `uv run python -m pytest`
   - `uv run ruff check .`
+
+## 2026-05-14 Menu Loop And Runtime Status Upgrade
+
+1. Extracted `get_default_current_date()` in `src/agent/cli.py` and routed the date prompt through it.
+2. Added interactive menu loop support:
+   - after one workflow finishes, the CLI can return to the main menu
+   - users can switch from one menu item to another without restarting the process
+   - entering `返回` during date entry or final review returns to the menu
+3. Added lightweight backend runtime checks:
+   - `get_backend_status()`
+   - `ensure_backend_ready()`
+   - menu header now shows backend readiness
+4. Added CLI tests for:
+   - default date helper behavior
+   - backend readiness failure
+   - return-to-menu behavior
+   - multi-workflow menu switching in one session
+
+Result:
+- Interactive mode now supports menu switching and return in one continuous session.
+- Workflow execution fails fast if the graph or calendar directory is not ready.
+- Verified:
+  - `uv run python -m pytest`
+  - `uv run ruff check .`

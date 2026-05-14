@@ -30,6 +30,7 @@ MENU_OPTIONS: dict[str, tuple[str, Intent]] = {
 }
 CANCEL_WORDS = {"exit", "quit", "cancel", "取消"}
 APPROVE_WORDS = {"通过", "pass", "approve", "approved", "ok", "yes", "y"}
+RETURN_MENU_WORDS = {"back", "menu", "return", "返回"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -68,7 +69,8 @@ async def run_workflow(
     prompt_on_write: bool = True,
 ) -> dict[str, object]:
     """Run one workflow, allow multi-turn Q&A, and optionally write files."""
-    resolved_date = current_date or date.today().isoformat()
+    ensure_backend_ready(calendar_dir)
+    resolved_date = current_date or get_default_current_date()
     base_thread_id = build_thread_id(intent=intent, current_date=resolved_date, calendar_dir=calendar_dir)
     base_payload: dict[str, Any] = {
         "intent": intent,
@@ -116,6 +118,10 @@ async def run_workflow(
             return result
 
         review_action = ask_for_review_action()
+        if review_action == "__return_to_menu__":
+            sys.stdout.write("Returning to menu.\n")
+            result["return_to_menu"] = True
+            return result
         if review_action is None:
             sys.stdout.write("Files not written.\n")
             result["cancelled"] = True
@@ -148,6 +154,9 @@ async def run_planning_round(*, payload: dict[str, Any], thread_id: str) -> dict
             return result
 
         answer = ask_llm_question(interrupt_payload)
+        if answer == "__return_to_menu__":
+            sys.stdout.write("Returning to menu.\n")
+            return {"return_to_menu": True, "thread_id": thread_id}
         if answer is None:
             sys.stdout.write("Workflow cancelled.\n")
             return {"cancelled": True, "thread_id": thread_id}
@@ -179,6 +188,8 @@ def ask_llm_question(interrupt_payload: dict[str, Any]) -> str | None:
     except EOFError:
         return None
 
+    if answer.lower() in RETURN_MENU_WORDS:
+        return "__return_to_menu__"
     if answer.lower() in CANCEL_WORDS:
         return None
     return answer
@@ -240,15 +251,50 @@ def build_review_thread_id(*, base_thread_id: str, review_round: int) -> str:
     return f"{base_thread_id}:review:{review_round}"
 
 
+def get_default_current_date() -> str:
+    """Return today's local date for CLI defaults."""
+    return date.today().isoformat()
+
+
+def get_backend_status(calendar_dir: Path) -> dict[str, object]:
+    """Return a lightweight backend health snapshot for the CLI."""
+    return {
+        "graph_ready": graph is not None,
+        "calendar_dir_exists": calendar_dir.exists(),
+        "calendar_dir": str(calendar_dir),
+    }
+
+
+def ensure_backend_ready(calendar_dir: Path) -> None:
+    """Fail fast if the CLI backend is not ready for a workflow run."""
+    status = get_backend_status(calendar_dir)
+    if not status["graph_ready"]:
+        raise RuntimeError("Backend graph is not ready.")
+    if not status["calendar_dir_exists"]:
+        raise RuntimeError(f"Calendar directory does not exist: {calendar_dir}")
+
+
+def format_backend_status(status: dict[str, object]) -> str:
+    """Render a concise backend status line for the interactive menu."""
+    readiness = "ready" if status["graph_ready"] and status["calendar_dir_exists"] else "error"
+    return (
+        f"Backend: {readiness} | "
+        f"graph={'ok' if status['graph_ready'] else 'missing'} | "
+        f"calendar_dir={'ok' if status['calendar_dir_exists'] else 'missing'}"
+    )
+
+
 def ask_for_review_action() -> str | None:
     """Ask for iterative review feedback before applying file writes."""
     try:
         action = input(
-            "输入修改意见继续调整；输入“通过”写文件；输入“取消”退出: "
+            "输入修改意见继续调整；输入“通过”写文件；输入“返回”回菜单；输入“取消”退出: "
         ).strip()
     except EOFError:
         return None
 
+    if action.lower() in RETURN_MENU_WORDS:
+        return "__return_to_menu__"
     if not action or action.lower() in CANCEL_WORDS:
         return None
     return action
@@ -259,27 +305,59 @@ def is_approval(action: str) -> bool:
     return action.strip().lower() in APPROVE_WORDS
 
 
-def choose_intent() -> Intent:
+def choose_intent(*, calendar_dir: Path | None = None) -> Intent:
     """Show the menu requested by the user and return the chosen workflow."""
+    status = format_backend_status(get_backend_status(calendar_dir or _default_calendar_dir()))
     choice = input(
-        "calendar-chat\n\n"
+        "calendar-chat\n"
+        f"{status}\n\n"
         "1. Weekly Plan\n"
         "2. Temp Plan\n"
         "3. Daily Plan\n"
         "4. Daily Reflect\n"
+        "输入 exit 退出\n"
         "请选择:"
     ).strip()
+    if choice.lower() in CANCEL_WORDS:
+        raise SystemExit(0)
     try:
         return MENU_OPTIONS[choice][1]
     except KeyError as error:
         raise SystemExit("Invalid option. Please enter 1-4.") from error
 
 
-def prompt_for_date() -> str:
+def prompt_for_date() -> str | None:
     """Return the user-selected date, defaulting to today."""
-    default_date = date.today().isoformat()
+    default_date = get_default_current_date()
     user_input = input(f"Date (YYYY-MM-DD, default {default_date}): ").strip()
+    if user_input.lower() in RETURN_MENU_WORDS or user_input.lower() in CANCEL_WORDS:
+        return None
     return user_input or default_date
+
+
+async def run_interactive_session(*, calendar_dir: Path, apply: bool) -> None:
+    """Run the top-level menu loop and allow users to switch workflows."""
+    while True:
+        intent = choose_intent(calendar_dir=calendar_dir)
+        current_date = prompt_for_date()
+        if current_date is None:
+            sys.stdout.write("Returning to menu.\n")
+            continue
+
+        result = await run_workflow(
+            intent=intent,
+            current_date=current_date,
+            calendar_dir=calendar_dir,
+            apply=apply,
+            prompt_on_write=True,
+        )
+
+        if result.get("return_to_menu") or result.get("cancelled"):
+            continue
+
+        follow_up = input("Press Enter to return to menu, or type exit to quit: ").strip()
+        if follow_up.lower() in CANCEL_WORDS:
+            return
 
 
 def _default_calendar_dir() -> Path:
@@ -291,15 +369,22 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    intent = args.intent or choose_intent()
-    current_date = args.current_date or (prompt_for_date() if not args.intent else None)
+    if args.intent:
+        asyncio.run(
+            run_workflow(
+                intent=args.intent,
+                current_date=args.current_date,
+                calendar_dir=args.calendar_dir,
+                apply=args.apply,
+                prompt_on_write=not args.apply,
+            )
+        )
+        return
+
     asyncio.run(
-        run_workflow(
-            intent=intent,
-            current_date=current_date,
+        run_interactive_session(
             calendar_dir=args.calendar_dir,
             apply=args.apply,
-            prompt_on_write=not args.apply,
         )
     )
 
