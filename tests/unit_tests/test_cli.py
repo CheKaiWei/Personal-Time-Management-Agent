@@ -6,8 +6,10 @@ from agent.cli import (
     MENU_OPTIONS,
     choose_intent,
     ensure_backend_ready,
+    parse_user_command,
     prompt_for_date,
     run_interactive_session,
+    run_text_command,
     run_workflow,
 )
 
@@ -53,6 +55,14 @@ def test_choose_intent_reads_requested_menu_option(monkeypatch) -> None:
     monkeypatch.setattr("builtins.input", lambda prompt="": "3")
 
     assert choose_intent() == MENU_OPTIONS["3"][1]
+
+
+def test_parse_user_command_supports_open_weekly_plan() -> None:
+    command = parse_user_command("打开 weekly plan")
+
+    assert command is not None
+    assert command.kind == "open_document"
+    assert command.document == "weekly_plan"
 
 
 def test_prompt_for_date_defaults_to_today(monkeypatch) -> None:
@@ -101,21 +111,35 @@ async def test_run_workflow_apply_writes_files(monkeypatch, tmp_path) -> None:
     async def fake_plan_daily_turn(**kwargs):
         return {
             "status": "ready",
-            "message": "Draft the main task first.",
+            "message": "Draft the main weekly work.",
             "draft": {
                 "intent": "daily_plan",
                 "current_date": "2026-05-14",
-                "checkpoint": "Existing checkpoint",
-                "reason": "Single focus only.",
-                "calendar_blocks": [
-                    "- [ ] Existing checkpoint [startTime:: 09:00] [endTime:: 10:00]"
-                ],
-                "meu_candidates": [
+                "focus_items": [
                     {
-                        "action": "Push the core output",
-                        "expected_minutes": 60,
-                        "verification": "One artifact exists.",
-                    }
+                        "checkpoint": "Research / Camera ready",
+                        "reason": "Highest urgency this week.",
+                        "time_block": "- [ ] Research / Camera ready [startTime:: 09:00] [endTime:: 10:00]",
+                        "meu_candidates": [
+                            {
+                                "action": "Draft the figure checklist",
+                                "expected_minutes": 45,
+                                "verification": "A checklist exists.",
+                            }
+                        ],
+                    },
+                    {
+                        "checkpoint": "Career / Interview prep",
+                        "reason": "Keep interview momentum.",
+                        "time_block": "- [ ] Career / Interview prep [startTime:: 14:00] [endTime:: 15:00]",
+                        "meu_candidates": [
+                            {
+                                "action": "Answer three mock questions",
+                                "expected_minutes": 30,
+                                "verification": "Three answers exist.",
+                            }
+                        ],
+                    },
                 ],
             },
         }
@@ -131,12 +155,13 @@ async def test_run_workflow_apply_writes_files(monkeypatch, tmp_path) -> None:
     )
 
     daily_text = (tmp_path / "2026-05-14.md").read_text(encoding="utf-8")
-    assert "Push the core output" in daily_text
+    assert "Draft the figure checklist. Verify: A checklist exists." in daily_text
+    assert "Answer three mock questions. Verify: Three answers exist." in daily_text
 
 
 async def test_run_workflow_revises_until_approved(monkeypatch, tmp_path) -> None:
     _write_calendar_fixture(tmp_path)
-    review_inputs = iter(["Please make the task more specific", "通过"])
+    review_inputs = iter(["Please make the first task more specific", "通过"])
     planning_calls: list[dict[str, object]] = []
 
     async def fake_plan_daily_turn(**kwargs):
@@ -153,16 +178,18 @@ async def test_run_workflow_revises_until_approved(monkeypatch, tmp_path) -> Non
                 "draft": {
                     "intent": "daily_plan",
                     "current_date": "2026-05-14",
-                    "checkpoint": "Existing checkpoint",
-                    "reason": "Updated after feedback.",
-                    "calendar_blocks": [
-                        "- [ ] Existing checkpoint [startTime:: 09:00] [endTime:: 10:00]"
-                    ],
-                    "meu_candidates": [
+                    "focus_items": [
                         {
-                            "action": "Draft the outline and first paragraph",
-                            "expected_minutes": 45,
-                            "verification": "An outline and one paragraph exist.",
+                            "checkpoint": "Existing checkpoint",
+                            "reason": "Updated after feedback.",
+                            "time_block": "- [ ] Existing checkpoint [startTime:: 09:00] [endTime:: 10:00]",
+                            "meu_candidates": [
+                                {
+                                    "action": "Draft the outline and first paragraph",
+                                    "expected_minutes": 45,
+                                    "verification": "An outline and one paragraph exist.",
+                                }
+                            ],
                         }
                     ],
                 },
@@ -174,16 +201,18 @@ async def test_run_workflow_revises_until_approved(monkeypatch, tmp_path) -> Non
             "draft": {
                 "intent": "daily_plan",
                 "current_date": "2026-05-14",
-                "checkpoint": "Existing checkpoint",
-                "reason": "Initial version.",
-                "calendar_blocks": [
-                    "- [ ] Existing checkpoint [startTime:: 09:00] [endTime:: 10:00]"
-                ],
-                "meu_candidates": [
+                "focus_items": [
                     {
-                        "action": "Push the core output",
-                        "expected_minutes": 60,
-                        "verification": "One artifact exists.",
+                        "checkpoint": "Existing checkpoint",
+                        "reason": "Initial version.",
+                        "time_block": "- [ ] Existing checkpoint [startTime:: 09:00] [endTime:: 10:00]",
+                        "meu_candidates": [
+                            {
+                                "action": "Push the core output",
+                                "expected_minutes": 60,
+                                "verification": "One artifact exists.",
+                            }
+                        ],
                     }
                 ],
             },
@@ -201,11 +230,11 @@ async def test_run_workflow_revises_until_approved(monkeypatch, tmp_path) -> Non
     )
 
     daily_text = (tmp_path / "2026-05-14.md").read_text(encoding="utf-8")
-    assert "Draft the outline and first paragraph" in daily_text
+    assert "Draft the outline and first paragraph. Verify: An outline and one paragraph exist." in daily_text
     assert len(planning_calls) == 2
-    assert planning_calls[1]["review_feedback_history"] == ["Please make the task more specific"]
+    assert planning_calls[1]["review_feedback_history"] == ["Please make the first task more specific"]
     assert planning_calls[1]["previous_draft"] is not None
-    assert result["draft"]["meu_candidates"][0]["action"] == "Draft the outline and first paragraph"
+    assert result["draft"]["focus_items"][0]["meu_candidates"][0]["action"] == "Draft the outline and first paragraph"
 
 
 async def test_run_workflow_returns_to_menu_from_review(monkeypatch, tmp_path) -> None:
@@ -218,16 +247,18 @@ async def test_run_workflow_returns_to_menu_from_review(monkeypatch, tmp_path) -
             "draft": {
                 "intent": "daily_plan",
                 "current_date": "2026-05-14",
-                "checkpoint": "Existing checkpoint",
-                "reason": "Initial version.",
-                "calendar_blocks": [
-                    "- [ ] Existing checkpoint [startTime:: 09:00] [endTime:: 10:00]"
-                ],
-                "meu_candidates": [
+                "focus_items": [
                     {
-                        "action": "Push the core output",
-                        "expected_minutes": 60,
-                        "verification": "One artifact exists.",
+                        "checkpoint": "Existing checkpoint",
+                        "reason": "Initial version.",
+                        "time_block": "- [ ] Existing checkpoint [startTime:: 09:00] [endTime:: 10:00]",
+                        "meu_candidates": [
+                            {
+                                "action": "Push the core output",
+                                "expected_minutes": 60,
+                                "verification": "One artifact exists.",
+                            }
+                        ],
                     }
                 ],
             },
@@ -287,19 +318,43 @@ async def test_run_workflow_handles_multi_turn_questions(monkeypatch, tmp_path) 
     assert result["qa_history"][0]["answer"] == "Finished the key draft revision."
 
 
-async def test_run_interactive_session_can_switch_menu(monkeypatch, tmp_path) -> None:
+async def test_run_text_command_opens_weekly_plan(monkeypatch, tmp_path) -> None:
     _write_calendar_fixture(tmp_path)
-    inputs = iter(["2", "", "", "3", "", "exit"])
-    calls: list[str] = []
+    monkeypatch.setattr("agent.cli.get_default_current_date", lambda: "2026-05-14")
+
+    result = await run_text_command(
+        command_text="open weekly plan",
+        current_date=None,
+        calendar_dir=tmp_path,
+        apply=False,
+    )
+
+    assert result["document"] == "weekly_plan"
+    assert result["path"].endswith("2026-05-11 Weekly Plan.md")
+    assert "Existing checkpoint" in result["content"]
+
+
+async def test_run_interactive_session_can_switch_between_open_and_workflow(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    _write_calendar_fixture(tmp_path)
+    inputs = iter(["open weekly plan", "", "", "daily plan", "", "exit"])
+    actions: list[str] = []
 
     async def fake_run_workflow(**kwargs):
-        calls.append(kwargs["intent"])
+        actions.append(kwargs["intent"])
         return {"thread_id": "t"}
+
+    def fake_show_document(**kwargs):
+        actions.append(f"open:{kwargs['document']}")
+        return {"document": kwargs["document"], "path": "x", "content": ""}
 
     monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
     monkeypatch.setattr("agent.cli.run_workflow", fake_run_workflow)
+    monkeypatch.setattr("agent.cli.show_document", fake_show_document)
     monkeypatch.setattr("agent.cli.get_default_current_date", lambda: "2099-01-02")
 
     await run_interactive_session(calendar_dir=tmp_path, apply=False)
 
-    assert calls == ["temp_plan", "daily_plan"]
+    assert actions == ["open:weekly_plan", "daily_plan"]

@@ -161,3 +161,26 @@ Result:
 - Verified:
   - `uv run python -m pytest`
   - `uv run ruff check .`
+
+## 2026-05-15 Weekly/Daily Expansion And Natural-Language Commands
+
+1. Raised weekly planning density in `src/agent/planner.py`:
+   - `weekly_plan` prompt changed from `3-5` to `5-7`
+   - fallback and normalization now keep at least 5 checkpoints when enough active long-term items exist
+2. Expanded `daily_plan` from one checkpoint into multiple `focus_items`:
+   - each item contains `checkpoint`, `time_block`, and `meu_candidates`
+   - fallback daily drafts now decompose weekly checkpoints into 2-4 daily focus items
+   - `calendar_writes.py` now writes grouped `Tasks` under each focus item
+3. Reworked `src/agent/cli.py`:
+   - kept the `1-4` workflow menu
+   - added natural-language command parsing for workflow selection and document viewing
+   - supported commands such as `weekly plan`, `open weekly plan`, `open daily plan`, and `open long term`
+4. Rewrote `README.md` and refreshed tests for planner, CLI, writes, and graph behavior.
+
+Result:
+- Weekly plans now produce denser checkpoint sets.
+- Daily plans now break weekly checkpoints into multiple actionable focus groups for the day.
+- The CLI is no longer limited to four hard-coded menu choices.
+- Verified:
+  - `uv run python -m pytest` (`28 passed`)
+  - `uv run python -m ruff check .`

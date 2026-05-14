@@ -14,6 +14,18 @@ from agent.calendar_files import DailyPlan, LongTermItem, WeeklyPlan
 from agent.config import OpenAISettings, build_openai_client, resolve_openai_settings
 
 MAX_QA_TURNS = 3
+MIN_WEEKLY_CHECKPOINTS = 5
+MAX_WEEKLY_CHECKPOINTS = 7
+MIN_DAILY_FOCUS_ITEMS = 2
+PREFERRED_DAILY_FOCUS_ITEMS = 3
+MAX_DAILY_FOCUS_ITEMS = 4
+MAX_MEUS_PER_FOCUS = 3
+DEFAULT_DAILY_TIME_SLOTS = (
+    ("09:00", "10:30"),
+    ("11:00", "12:00"),
+    ("14:00", "15:30"),
+    ("16:00", "17:00"),
+)
 PLANNER_SYSTEM_PROMPT = """
 You are a careful calendar planning assistant.
 
@@ -57,11 +69,12 @@ async def plan_weekly_turn(
     }
     prompt = """
 Workflow: weekly_plan
-Goal: choose this week's 3-5 checkpoints from long-term items.
+Goal: choose this week's 5-7 checkpoints from long-term items.
 
 Rules:
 - A checkpoint is a weekly outcome, not a micro-action.
 - Prefer meaningful progress on important and urgent work, but do not blindly sort.
+- When there are at least 5 active long-term items, do not return fewer than 5 checkpoints.
 - Keep or mention relevant temp tasks only when they really matter this week.
 - If review feedback exists, revise the previous draft to satisfy it unless it conflicts with the file context.
 - If the current context is enough, finalize.
@@ -159,7 +172,7 @@ async def plan_daily_turn(
     review_feedback_history: list[str] | None = None,
     previous_draft: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Use the LLM to choose today's checkpoint and MEUs."""
+    """Use the LLM to decompose weekly checkpoints into today's focus items."""
     fallback = build_daily_plan_draft(
         current_date=current_date,
         weekly_plan=weekly_plan,
@@ -172,13 +185,15 @@ async def plan_daily_turn(
     }
     prompt = """
 Workflow: daily_plan
-Goal: choose exactly one checkpoint for today and break it into 1-3 MEUs.
+Goal: turn this week's checkpoints into 2-4 realistic focus items for today.
 
 Rules:
-- Choose exactly one checkpoint.
 - If today's calendar already contains meaningful focus blocks, align with them unless
   there is a strong reason not to.
-- Each MEU must be concrete and verifiable.
+- Prefer work that clearly advances this week's checkpoints rather than unrelated filler.
+- When enough weekly checkpoints exist, do not return fewer than 2 focus items.
+- Each focus item must include 1-3 concrete and verifiable MEUs.
+- Each focus item must include a time_block line that only names the checkpoint and includes start/end times.
 - If review feedback exists, revise the previous draft to satisfy it unless it conflicts with the file context.
 - Ask a concise clarifying question only if today's focus is genuinely ambiguous.
 
@@ -188,13 +203,18 @@ Return JSON with this shape:
   "message": "Chinese summary",
   "question": "Chinese question or empty string",
   "draft": {
-    "checkpoint": "string",
-    "reason": "Chinese rationale",
-    "meu_candidates": [
+    "focus_items": [
       {
-        "action": "string",
-        "expected_minutes": 30,
-        "verification": "string"
+        "checkpoint": "string",
+        "reason": "Chinese rationale",
+        "time_block": "- [ ] string [startTime:: HH:MM] [endTime:: HH:MM]",
+        "meu_candidates": [
+          {
+            "action": "string",
+            "expected_minutes": 30,
+            "verification": "string"
+          }
+        ]
       }
     ]
   }
@@ -331,29 +351,32 @@ def format_daily_plan_response(
     qa_history: list[dict[str, str]] | None = None,
 ) -> str:
     """Render a concise daily plan preview."""
+    focus_items = draft.get("focus_items") or _build_legacy_focus_items(draft)
+    calendar_blocks = draft.get("calendar_blocks") or [
+        focus["time_block"]
+        for focus in focus_items
+        if focus.get("time_block")
+    ]
     lines: list[str] = []
     if llm_message:
         lines.append(f"LLM Summary: {llm_message}")
     if qa_history:
         lines.append(f"Q&A turns: {len(qa_history)}")
-    if draft.get("reason"):
-        lines.append(f"Checkpoint reason: {draft['reason']}")
-    lines.extend(
-        [
-            f"Daily plan draft for {draft['current_date']}:",
-            f"Today's checkpoint: {draft['checkpoint']}",
-            "MEU:",
-        ]
-    )
-    lines.extend(
-        (
-            f"{index}. {item['action']} | verify: {item['verification']} | "
-            f"minutes={item['expected_minutes']}"
+    lines.append(f"Daily plan draft for {draft['current_date']}:")
+    lines.append("Today's focus items:")
+    for index, focus in enumerate(focus_items, start=1):
+        reason = f" | reason: {focus['reason']}" if focus.get("reason") else ""
+        lines.append(f"{index}. {focus['checkpoint']}{reason}")
+        lines.append(f"   block: {focus['time_block']}")
+        lines.extend(
+            (
+                f"   {index}.{meu_index} {item['action']} | "
+                f"verify: {item['verification']} | minutes={item['expected_minutes']}"
+            )
+            for meu_index, item in enumerate(focus["meu_candidates"], start=1)
         )
-        for index, item in enumerate(draft["meu_candidates"], start=1)
-    )
     lines.append("Calendar:")
-    lines.extend(draft["calendar_blocks"])
+    lines.extend(calendar_blocks)
     return "\n".join(lines)
 
 
@@ -390,10 +413,8 @@ def build_weekly_plan_draft(
             "expected_hours": item.expected_hours or "2h",
             "reason": "",
         }
-        for item in _select_active_items(long_term_items, limit=5)
+        for item in _select_active_items(long_term_items, limit=MAX_WEEKLY_CHECKPOINTS)
     ]
-    if len(checkpoints) > 3:
-        checkpoints = checkpoints[:3]
 
     daily_links = [
         (date.fromisoformat(week_start) + timedelta(days=offset)).isoformat()
@@ -439,26 +460,45 @@ def build_daily_plan_draft(
     daily_plan: DailyPlan,
 ) -> dict[str, Any]:
     """Create a deterministic fallback daily plan draft."""
-    checkpoint = _first_checkbox_text(daily_plan.calendar)
-    if not checkpoint:
-        checkpoint = (
-            weekly_plan.checkpoints[0]
-            if weekly_plan.checkpoints
-            else "Add today's single checkpoint"
-        )
-    calendar_blocks = daily_plan.calendar or [
-        f"- [ ] {checkpoint} [startTime:: 09:00] [endTime:: 10:30]",
-        f"- [ ] {checkpoint} [startTime:: 14:00] [endTime:: 15:00]",
+    candidate_checkpoints = _build_daily_checkpoint_candidates(
+        weekly_plan=weekly_plan,
+        daily_plan=daily_plan,
+    )
+    focus_count = _preferred_daily_focus_count(candidate_checkpoints)
+    focus_items = [
+        {
+            "checkpoint": checkpoint,
+            "reason": "",
+            "time_block": _build_time_block(
+                checkpoint,
+                index=index,
+                seed_line=daily_plan.calendar[index] if index < len(daily_plan.calendar) else None,
+            ),
+            "meu_candidates": build_meu_candidates(checkpoint),
+        }
+        for index, checkpoint in enumerate(candidate_checkpoints[:focus_count])
     ]
-    meu_candidates = build_meu_candidates(checkpoint)
+    if not focus_items:
+        focus_items = [
+            {
+                "checkpoint": "Advance this week's checkpoints",
+                "reason": "",
+                "time_block": _build_time_block("Advance this week's checkpoints", index=0),
+                "meu_candidates": build_meu_candidates("Advance this week's checkpoints"),
+            }
+        ]
+
+    calendar_blocks = [item["time_block"] for item in focus_items]
+    primary_focus = focus_items[0]
 
     return {
         "intent": "daily_plan",
         "current_date": current_date,
-        "checkpoint": checkpoint,
-        "reason": "",
+        "checkpoint": primary_focus["checkpoint"],
+        "reason": primary_focus["reason"],
         "calendar_blocks": calendar_blocks,
-        "meu_candidates": meu_candidates,
+        "meu_candidates": primary_focus["meu_candidates"],
+        "focus_items": focus_items,
         "existing_notes": daily_plan.notes,
     }
 
@@ -472,7 +512,7 @@ def build_daily_reflect_draft(
     task_count = sum(1 for line in daily_plan.tasks if line.lstrip().startswith("- ["))
     completed_count = sum(1 for line in daily_plan.tasks if line.lstrip().startswith("- [x]"))
     pending_count = max(task_count - completed_count, 0)
-    first_focus = _first_checkbox_text(daily_plan.calendar) or "today's main checkpoint"
+    first_focus = _first_calendar_focus_text(daily_plan.calendar) or "today's main checkpoint"
 
     reflect_lines = [
         f"- Today had {len(daily_plan.calendar)} calendar blocks and {task_count} task lines.",
@@ -508,6 +548,45 @@ def build_meu_candidates(checkpoint: str) -> list[dict[str, Any]]:
             "verification": "Add one progress note to Notes.",
         },
     ]
+
+
+def _build_daily_checkpoint_candidates(
+    *,
+    weekly_plan: WeeklyPlan,
+    daily_plan: DailyPlan,
+) -> list[str]:
+    existing_focuses = [
+        focus
+        for line in daily_plan.calendar
+        if (focus := _extract_calendar_focus_text(line))
+    ]
+    weekly_focuses = [checkpoint.strip() for checkpoint in weekly_plan.checkpoints if checkpoint.strip()]
+    candidate_checkpoints = _unique_non_empty([*existing_focuses, *weekly_focuses])
+    if candidate_checkpoints:
+        return candidate_checkpoints
+    return ["Advance this week's checkpoints"]
+
+
+def _preferred_daily_focus_count(candidate_checkpoints: list[str]) -> int:
+    if not candidate_checkpoints:
+        return 1
+    if len(candidate_checkpoints) >= PREFERRED_DAILY_FOCUS_ITEMS:
+        return min(PREFERRED_DAILY_FOCUS_ITEMS, MAX_DAILY_FOCUS_ITEMS)
+    if len(candidate_checkpoints) >= MIN_DAILY_FOCUS_ITEMS:
+        return len(candidate_checkpoints)
+    return 1
+
+
+def _build_time_block(
+    checkpoint: str,
+    *,
+    index: int,
+    seed_line: str | None = None,
+) -> str:
+    start_time, end_time = _extract_time_window(seed_line) or DEFAULT_DAILY_TIME_SLOTS[
+        index % len(DEFAULT_DAILY_TIME_SLOTS)
+    ]
+    return f"- [ ] {checkpoint} [startTime:: {start_time}] [endTime:: {end_time}]"
 
 
 def classify_temp_task(task: str) -> str:
@@ -618,7 +697,7 @@ def _normalize_weekly_decision(
     raw_items = raw_draft.get("weekly_checkpoints") or []
     weekly_checkpoints: list[dict[str, Any]] = []
 
-    for raw_item in raw_items[:5]:
+    for raw_item in raw_items[:MAX_WEEKLY_CHECKPOINTS]:
         if not isinstance(raw_item, dict):
             continue
         title = str(raw_item.get("title", "")).strip()
@@ -641,8 +720,11 @@ def _normalize_weekly_decision(
             }
         )
 
-    if not weekly_checkpoints:
-        weekly_checkpoints = fallback["weekly_checkpoints"]
+    weekly_checkpoints = _merge_weekly_checkpoints(
+        primary=weekly_checkpoints,
+        fallback=fallback["weekly_checkpoints"],
+        minimum_count=min(MIN_WEEKLY_CHECKPOINTS, len(fallback["weekly_checkpoints"])),
+    )
 
     temp_tasks = raw_draft.get("temp_tasks")
     if not isinstance(temp_tasks, list) or not temp_tasks:
@@ -653,7 +735,7 @@ def _normalize_weekly_decision(
         "message": str(decision.get("message", "")).strip(),
         "draft": {
             **fallback,
-            "weekly_checkpoints": weekly_checkpoints[:5],
+            "weekly_checkpoints": weekly_checkpoints[:MAX_WEEKLY_CHECKPOINTS],
             "temp_tasks": [str(task).strip() for task in temp_tasks if str(task).strip()],
         },
     }
@@ -712,42 +794,52 @@ def _normalize_daily_decision(
         return _normalize_question_decision(decision)
 
     raw_draft = decision.get("draft") or {}
-    checkpoint = str(raw_draft.get("checkpoint") or fallback["checkpoint"]).strip()
-    reason = str(raw_draft.get("reason", "")).strip()
-    raw_meus = raw_draft.get("meu_candidates") or []
-    meu_candidates: list[dict[str, Any]] = []
+    raw_focus_items = raw_draft.get("focus_items") or []
+    if not raw_focus_items and raw_draft.get("checkpoint"):
+        raw_focus_items = [raw_draft]
 
-    for raw_item in raw_meus[:3]:
+    focus_items: list[dict[str, Any]] = []
+    for index, raw_item in enumerate(raw_focus_items[:MAX_DAILY_FOCUS_ITEMS]):
         if not isinstance(raw_item, dict):
             continue
-        action = str(raw_item.get("action", "")).strip()
-        verification = str(raw_item.get("verification", "")).strip()
-        if not action or not verification:
+        checkpoint = str(raw_item.get("checkpoint", "")).strip()
+        if not checkpoint:
             continue
-        expected_minutes = raw_item.get("expected_minutes")
-        try:
-            expected_minutes = int(expected_minutes)
-        except (TypeError, ValueError):
-            expected_minutes = 30
-        meu_candidates.append(
+        fallback_focus = fallback["focus_items"][index] if index < len(fallback["focus_items"]) else None
+        focus_items.append(
             {
-                "action": action,
-                "expected_minutes": expected_minutes,
-                "verification": verification,
+                "checkpoint": checkpoint,
+                "reason": str(raw_item.get("reason", "")).strip(),
+                "time_block": _normalize_time_block(
+                    raw_item.get("time_block"),
+                    checkpoint=checkpoint,
+                    index=index,
+                    fallback_time_block=fallback_focus["time_block"] if fallback_focus else None,
+                ),
+                "meu_candidates": _normalize_meu_candidates(
+                    raw_item.get("meu_candidates"),
+                    fallback_focus["meu_candidates"] if fallback_focus else build_meu_candidates(checkpoint),
+                ),
             }
         )
 
-    if not meu_candidates:
-        meu_candidates = fallback["meu_candidates"]
+    focus_items = _merge_daily_focus_items(
+        primary=focus_items,
+        fallback=fallback["focus_items"],
+        minimum_count=min(MIN_DAILY_FOCUS_ITEMS, len(fallback["focus_items"])),
+    )
+    primary_focus = focus_items[0]
 
     return {
         "status": "ready",
         "message": str(decision.get("message", "")).strip(),
         "draft": {
             **fallback,
-            "checkpoint": checkpoint or fallback["checkpoint"],
-            "reason": reason,
-            "meu_candidates": meu_candidates[:3],
+            "checkpoint": primary_focus["checkpoint"],
+            "reason": primary_focus["reason"],
+            "meu_candidates": primary_focus["meu_candidates"],
+            "focus_items": focus_items,
+            "calendar_blocks": [item["time_block"] for item in focus_items],
         },
     }
 
@@ -835,6 +927,113 @@ def _normalize_reflect_line(line: Any) -> str:
     return text if text.startswith("- ") else f"- {text.lstrip('- ').strip()}"
 
 
+def _normalize_meu_candidates(
+    raw_meus: Any,
+    fallback_meus: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    meu_candidates: list[dict[str, Any]] = []
+    for raw_item in (raw_meus or [])[:MAX_MEUS_PER_FOCUS]:
+        if not isinstance(raw_item, dict):
+            continue
+        action = str(raw_item.get("action", "")).strip()
+        verification = str(raw_item.get("verification", "")).strip()
+        if not action or not verification:
+            continue
+        expected_minutes = raw_item.get("expected_minutes")
+        try:
+            expected_minutes = int(expected_minutes)
+        except (TypeError, ValueError):
+            expected_minutes = 30
+        meu_candidates.append(
+            {
+                "action": action,
+                "expected_minutes": expected_minutes,
+                "verification": verification,
+            }
+        )
+
+    return meu_candidates or fallback_meus[:MAX_MEUS_PER_FOCUS]
+
+
+def _merge_weekly_checkpoints(
+    *,
+    primary: list[dict[str, Any]],
+    fallback: list[dict[str, Any]],
+    minimum_count: int,
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for item in [*primary, *fallback]:
+        key = str(item.get("row_id") or item.get("title") or "").strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+        if len(merged) >= MAX_WEEKLY_CHECKPOINTS:
+            break
+
+    if len(merged) >= minimum_count:
+        return merged
+    return merged or fallback[:MAX_WEEKLY_CHECKPOINTS]
+
+
+def _merge_daily_focus_items(
+    *,
+    primary: list[dict[str, Any]],
+    fallback: list[dict[str, Any]],
+    minimum_count: int,
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for item in [*primary, *fallback]:
+        checkpoint = str(item.get("checkpoint", "")).strip()
+        if not checkpoint or checkpoint in seen:
+            continue
+        seen.add(checkpoint)
+        merged.append(item)
+        if len(merged) >= MAX_DAILY_FOCUS_ITEMS:
+            break
+
+    if len(merged) >= minimum_count:
+        return merged
+    return merged or fallback[:MAX_DAILY_FOCUS_ITEMS]
+
+
+def _normalize_time_block(
+    raw_time_block: Any,
+    *,
+    checkpoint: str,
+    index: int,
+    fallback_time_block: str | None = None,
+) -> str:
+    time_block = str(raw_time_block or "").strip()
+    if time_block:
+        return _build_time_block(checkpoint, index=index, seed_line=time_block)
+    if fallback_time_block:
+        return _build_time_block(checkpoint, index=index, seed_line=fallback_time_block)
+    return _build_time_block(checkpoint, index=index)
+
+
+def _build_legacy_focus_items(draft: dict[str, Any]) -> list[dict[str, Any]]:
+    checkpoint = str(draft.get("checkpoint", "")).strip()
+    if not checkpoint:
+        return []
+    return [
+        {
+            "checkpoint": checkpoint,
+            "reason": str(draft.get("reason", "")).strip(),
+            "time_block": (
+                draft.get("calendar_blocks", ["- [ ] " + checkpoint])[0]
+                if draft.get("calendar_blocks")
+                else _build_time_block(checkpoint, index=0)
+            ),
+            "meu_candidates": draft.get("meu_candidates", []),
+        }
+    ]
+
+
 def _select_active_items(long_term_items: list[LongTermItem], limit: int) -> list[LongTermItem]:
     active_items = [item for item in long_term_items if item.task and not _is_done(item.status)]
     return sorted(active_items, key=_priority_sort_key)[:limit]
@@ -865,12 +1064,42 @@ def _checkpoint_title(item: LongTermItem) -> str:
     return item.task
 
 
-def _first_checkbox_text(lines: list[str]) -> str | None:
+def _extract_calendar_focus_text(line: str) -> str | None:
+    text = line.strip()
+    if not text:
+        return None
+    text = re.sub(r"^\s*-\s*", "", text)
+    text = re.sub(r"^\[[ xX]\]\s*", "", text)
+    text = re.sub(r"\s*\[startTime:: [^\]]+\]", "", text)
+    text = re.sub(r"\s*\[endTime:: [^\]]+\]", "", text)
+    cleaned = text.strip()
+    return cleaned or None
+
+
+def _first_calendar_focus_text(lines: list[str]) -> str | None:
     for line in lines:
-        match = re.match(r"^\s*-\s*\[[ xX]\]\s*(?P<item>.+?)\s*$", line)
-        if match:
-            item = match.group("item")
-            item = re.sub(r"\s*\[startTime:: [^\]]+\]", "", item)
-            item = re.sub(r"\s*\[endTime:: [^\]]+\]", "", item)
-            return item.strip()
+        if focus := _extract_calendar_focus_text(line):
+            return focus
     return None
+
+
+def _extract_time_window(line: str | None) -> tuple[str, str] | None:
+    if not line:
+        return None
+    start_match = re.search(r"\[startTime:: (?P<time>[^\]]+)\]", line)
+    end_match = re.search(r"\[endTime:: (?P<time>[^\]]+)\]", line)
+    if not start_match or not end_match:
+        return None
+    return start_match.group("time").strip(), end_match.group("time").strip()
+
+
+def _unique_non_empty(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique_values: list[str] = []
+    for value in values:
+        normalized = value.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        unique_values.append(normalized)
+    return unique_values

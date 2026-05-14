@@ -109,15 +109,19 @@ def build_daily_plan_patches(
 ) -> list[FilePatch]:
     """Build the patch that writes today's calendar and tasks."""
     paths = resolve_calendar_paths(calendar_dir, current_date)
-    task_lines = [f"- [ ] {draft['checkpoint']}"]
-    task_lines.extend(
-        f"  - [ ] {item['action']}。验证：{item['verification']}"
-        for item in draft["meu_candidates"]
-    )
+    focus_items = draft.get("focus_items") or _build_legacy_focus_items(draft)
+    task_lines: list[str] = []
+
+    for focus in focus_items:
+        task_lines.append(f"- [ ] {focus['checkpoint']}")
+        task_lines.extend(
+            f"  - [ ] {item['action']}. Verify: {item['verification']}"
+            for item in focus["meu_candidates"]
+        )
 
     content = _render_daily_plan(
         daily_plan=daily_plan,
-        calendar_lines=draft["calendar_blocks"],
+        calendar_lines=[focus["time_block"] for focus in focus_items],
         task_lines=task_lines,
         note_lines=daily_plan.sections.get("Notes", []),
         reflect_lines=daily_plan.sections.get("Reflect", []),
@@ -208,6 +212,23 @@ def _render_daily_template() -> str:
         ["Calendar", "Tasks", "Notes", "Reflect"],
         {"Calendar": [], "Tasks": [], "Notes": [], "Reflect": []},
     )
+
+
+def _build_legacy_focus_items(draft: dict[str, Any]) -> list[dict[str, Any]]:
+    checkpoint = str(draft.get("checkpoint", "")).strip()
+    if not checkpoint:
+        return []
+    return [
+        {
+            "checkpoint": checkpoint,
+            "time_block": (
+                draft.get("calendar_blocks", ["- [ ] " + checkpoint])[0]
+                if draft.get("calendar_blocks")
+                else f"- [ ] {checkpoint}"
+            ),
+            "meu_candidates": draft.get("meu_candidates", []),
+        }
+    ]
 
 
 def _merge_section_order(*, required_order: list[str], existing_order: list[str]) -> list[str]:

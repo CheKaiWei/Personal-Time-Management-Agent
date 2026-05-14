@@ -235,38 +235,51 @@ def _load_daily_plan(path: Path) -> DailyPlan:
     return parse_daily_plan(path.read_text(encoding="utf-8"))
 
 
-graph = (
-    StateGraph(State)
-    .add_node("load_context", load_context)
-    .add_node("weekly_plan", weekly_plan)
-    .add_node("temp_plan", temp_plan)
-    .add_node("daily_plan", daily_plan)
-    .add_node("daily_reflect", daily_reflect)
-    .add_edge(START, "load_context")
-    .add_conditional_edges(
-        "load_context",
-        route_intent,
-        {
-            "weekly_plan": "weekly_plan",
-            "temp_plan": "temp_plan",
-            "daily_plan": "daily_plan",
-            "daily_reflect": "daily_reflect",
-        },
-    )
-    .add_edge("weekly_plan", END)
-    .add_edge("temp_plan", END)
-    .add_edge("daily_plan", END)
-    .add_edge("daily_reflect", END)
-    .compile(
-        name="Calendar Planning Graph",
-        checkpointer=InMemorySaver(
-            serde=JsonPlusSerializer(
-                allowed_msgpack_modules=(
-                    ("agent.calendar_files", "DailyPlan"),
-                    ("agent.calendar_files", "LongTermItem"),
-                    ("agent.calendar_files", "WeeklyPlan"),
-                )
+def _build_local_checkpointer() -> InMemorySaver:
+    return InMemorySaver(
+        serde=JsonPlusSerializer(
+            allowed_msgpack_modules=(
+                ("agent.calendar_files", "DailyPlan"),
+                ("agent.calendar_files", "LongTermItem"),
+                ("agent.calendar_files", "WeeklyPlan"),
             )
-        ),
+        )
     )
-)
+
+
+def _compile_graph(*, checkpointer: InMemorySaver | None = None):
+    builder = (
+        StateGraph(State)
+        .add_node("load_context", load_context)
+        .add_node("weekly_plan", weekly_plan)
+        .add_node("temp_plan", temp_plan)
+        .add_node("daily_plan", daily_plan)
+        .add_node("daily_reflect", daily_reflect)
+        .add_edge(START, "load_context")
+        .add_conditional_edges(
+            "load_context",
+            route_intent,
+            {
+                "weekly_plan": "weekly_plan",
+                "temp_plan": "temp_plan",
+                "daily_plan": "daily_plan",
+                "daily_reflect": "daily_reflect",
+            },
+        )
+        .add_edge("weekly_plan", END)
+        .add_edge("temp_plan", END)
+        .add_edge("daily_plan", END)
+        .add_edge("daily_reflect", END)
+    )
+
+    compile_kwargs: dict[str, object] = {"name": "Calendar Planning Graph"}
+    if checkpointer is not None:
+        compile_kwargs["checkpointer"] = checkpointer
+    return builder.compile(**compile_kwargs)
+
+
+# Local CLI/tests need an explicit checkpointer for interrupt/resume.
+graph = _compile_graph(checkpointer=_build_local_checkpointer())
+
+# LangGraph API manages persistence itself and rejects a custom checkpointer.
+api_graph = _compile_graph()

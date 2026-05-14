@@ -58,7 +58,7 @@ async def test_weekly_plan_uses_llm_draft(monkeypatch, tmp_path) -> None:
         assert kwargs["week_start"] == "2026-05-11"
         return {
             "status": "ready",
-            "message": "本周重点先放在论文和面试。",
+            "message": "This week's top work is research and interview prep.",
             "draft": {
                 "intent": "weekly_plan",
                 "current_date": "2026-05-14",
@@ -70,7 +70,7 @@ async def test_weekly_plan_uses_llm_draft(monkeypatch, tmp_path) -> None:
                         "priority": "P1",
                         "urgency": "E1",
                         "expected_hours": "6h",
-                        "reason": "DDL 最近且影响最大。",
+                        "reason": "Closest deadline and highest impact.",
                     }
                 ],
                 "temp_tasks": ["Renew visa"],
@@ -99,7 +99,7 @@ async def test_temp_plan_uses_llm_structuring(monkeypatch, tmp_path) -> None:
     async def fake_plan_temp_turn(**kwargs):
         return {
             "status": "ready",
-            "message": "临时任务已按影响和时效整理。",
+            "message": "Temp tasks are structured by urgency.",
             "draft": {
                 "intent": "temp_plan",
                 "structured_temp_tasks": [
@@ -108,7 +108,7 @@ async def test_temp_plan_uses_llm_structuring(monkeypatch, tmp_path) -> None:
                         "category": "admin",
                         "urgency": "high",
                         "should_enter_weekly_plan": True,
-                        "reason": "有明确时间压力。",
+                        "reason": "Time-sensitive document work.",
                     }
                 ],
             },
@@ -129,31 +129,40 @@ async def test_temp_plan_uses_llm_structuring(monkeypatch, tmp_path) -> None:
     assert "reason=" in result["response"]
 
 
-async def test_daily_plan_uses_llm_checkpoint_and_meus(monkeypatch, tmp_path) -> None:
+async def test_daily_plan_uses_llm_focus_items_and_meus(monkeypatch, tmp_path) -> None:
     _write_calendar_fixture(tmp_path)
 
     async def fake_plan_daily_turn(**kwargs):
         return {
             "status": "ready",
-            "message": "今天保持与已有日历时间块一致。",
+            "message": "Spread today's effort across weekly checkpoints.",
             "draft": {
                 "intent": "daily_plan",
                 "current_date": "2026-05-14",
-                "checkpoint": "Existing checkpoint",
-                "reason": "已有时间块已经为它预留。",
-                "calendar_blocks": [
-                    "- [ ] Existing checkpoint [startTime:: 09:00] [endTime:: 10:00]"
-                ],
-                "meu_candidates": [
+                "focus_items": [
                     {
-                        "action": "Write the first paragraph",
-                        "expected_minutes": 30,
-                        "verification": "One paragraph is drafted.",
+                        "checkpoint": "Research / Camera ready",
+                        "reason": "Research is the highest urgency item.",
+                        "time_block": "- [ ] Research / Camera ready [startTime:: 09:00] [endTime:: 10:00]",
+                        "meu_candidates": [
+                            {
+                                "action": "Draft the figure checklist",
+                                "expected_minutes": 30,
+                                "verification": "A checklist exists.",
+                            }
+                        ],
                     },
                     {
-                        "action": "List blockers",
-                        "expected_minutes": 10,
-                        "verification": "A blocker list exists.",
+                        "checkpoint": "Career / Interview prep",
+                        "reason": "Keep interview preparation moving.",
+                        "time_block": "- [ ] Career / Interview prep [startTime:: 14:00] [endTime:: 15:00]",
+                        "meu_candidates": [
+                            {
+                                "action": "Answer three mock questions",
+                                "expected_minutes": 30,
+                                "verification": "Three answers exist.",
+                            }
+                        ],
                     },
                 ],
             },
@@ -170,9 +179,9 @@ async def test_daily_plan_uses_llm_checkpoint_and_meus(monkeypatch, tmp_path) ->
         {"configurable": {"thread_id": "day:2026-05-14"}},
     )
 
-    assert result["draft"]["checkpoint"] == "Existing checkpoint"
-    assert len(result["draft"]["meu_candidates"]) == 2
-    assert "Checkpoint reason:" in result["response"]
+    assert len(result["draft"]["focus_items"]) == 2
+    assert result["draft"]["focus_items"][0]["checkpoint"] == "Research / Camera ready"
+    assert "Today's focus items:" in result["response"]
 
 
 async def test_daily_reflect_supports_interrupt_resume(monkeypatch, tmp_path) -> None:
@@ -183,21 +192,21 @@ async def test_daily_reflect_supports_interrupt_resume(monkeypatch, tmp_path) ->
         if not qa_history:
             return {
                 "status": "needs_input",
-                "message": "我还缺少今天实际完成情况。",
-                "question": "今天最重要的实际进展是什么？",
+                "message": "One completion fact is still missing.",
+                "question": "What was the most important actual progress today?",
             }
 
-        assert qa_history[0]["answer"] == "完成了相机 ready 的正文修改。"
+        assert qa_history[0]["answer"] == "Finished the camera-ready revision."
         return {
             "status": "ready",
-            "message": "已结合你的补充整理复盘。",
+            "message": "Daily reflection is ready.",
             "draft": {
                 "intent": "daily_reflect",
                 "current_date": "2026-05-14",
                 "reflect_lines": [
-                    "- 完成了相机 ready 的正文修改。",
-                    "- 未完成的是实验复核。",
-                    "- 明天继续推进 Existing checkpoint。",
+                    "- Finished the camera-ready revision.",
+                    "- Experiment rerun is still pending.",
+                    "- Tomorrow continue Existing checkpoint.",
                 ],
             },
         }
@@ -215,12 +224,12 @@ async def test_daily_reflect_supports_interrupt_resume(monkeypatch, tmp_path) ->
     )
 
     interrupt = first["__interrupt__"][0].value
-    assert interrupt["question"] == "今天最重要的实际进展是什么？"
+    assert interrupt["question"] == "What was the most important actual progress today?"
 
     resumed = await graph.ainvoke(
-        Command(resume="完成了相机 ready 的正文修改。"),
+        Command(resume="Finished the camera-ready revision."),
         config,
     )
 
-    assert resumed["draft"]["reflect_lines"][0] == "- 完成了相机 ready 的正文修改。"
+    assert resumed["draft"]["reflect_lines"][0] == "- Finished the camera-ready revision."
     assert "Q&A turns: 1" in resumed["response"]

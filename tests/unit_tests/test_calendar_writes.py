@@ -81,7 +81,7 @@ def test_build_temp_plan_patches_rewrites_temp_tasks(tmp_path) -> None:
     assert "weekly: yes" in weekly_text
 
 
-def test_build_daily_plan_patches_updates_calendar_and_tasks(tmp_path) -> None:
+def test_build_daily_plan_patches_updates_multiple_focus_items(tmp_path) -> None:
     daily_path = tmp_path / "2026-05-14.md"
     daily_path.write_text(
         """
@@ -103,21 +103,37 @@ def test_build_daily_plan_patches_updates_calendar_and_tasks(tmp_path) -> None:
         current_date="2026-05-14",
         daily_plan=daily_plan,
         draft={
-            "checkpoint": "Existing checkpoint",
-            "calendar_blocks": [
-                "- [ ] Existing checkpoint [startTime:: 09:00] [endTime:: 10:30]"
-            ],
-            "meu_candidates": [
-                {"action": "明确完成标准", "verification": "写下一句完成标准。"},
-                {"action": "推进核心产出", "verification": "产出一段成果。"},
-            ],
+            "focus_items": [
+                {
+                    "checkpoint": "Research / Camera ready",
+                    "time_block": "- [ ] Research / Camera ready [startTime:: 09:00] [endTime:: 10:30]",
+                    "meu_candidates": [
+                        {
+                            "action": "Draft the figure checklist",
+                            "verification": "A checklist file exists",
+                        }
+                    ],
+                },
+                {
+                    "checkpoint": "Career / Interview prep",
+                    "time_block": "- [ ] Career / Interview prep [startTime:: 14:00] [endTime:: 15:00]",
+                    "meu_candidates": [
+                        {
+                            "action": "Answer three mock questions",
+                            "verification": "Three written answers exist",
+                        }
+                    ],
+                },
+            ]
         },
     )
     apply_file_patches(patches)
 
     daily_text = daily_path.read_text(encoding="utf-8")
-    assert "Existing checkpoint [startTime:: 09:00]" in daily_text
-    assert "  - [ ] 明确完成标准。验证：写下一句完成标准。" in daily_text
+    assert "Research / Camera ready [startTime:: 09:00]" in daily_text
+    assert "- [ ] Career / Interview prep" in daily_text
+    assert "  - [ ] Draft the figure checklist. Verify: A checklist file exists" in daily_text
+    assert "  - [ ] Answer three mock questions. Verify: Three written answers exist" in daily_text
     assert "- Existing note" in daily_text
 
 
@@ -144,10 +160,10 @@ def test_build_daily_reflect_patches_updates_only_reflect(tmp_path) -> None:
         calendar_dir=tmp_path,
         current_date="2026-05-14",
         daily_plan=daily_plan,
-        draft={"reflect_lines": ["- 今天推进稳定。", "- 明天继续这个 checkpoint。"]},
+        draft={"reflect_lines": ["- Today progressed steadily.", "- Tomorrow continue the same checkpoint."]},
     )
     apply_file_patches(patches)
 
     daily_text = daily_path.read_text(encoding="utf-8")
-    assert "- 今天推进稳定。" in daily_text
+    assert "- Today progressed steadily." in daily_text
     assert "- Existing note" in daily_text
