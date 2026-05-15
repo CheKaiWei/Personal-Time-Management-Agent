@@ -5,6 +5,7 @@
 files, uses an LLM to reason about the next action, can ask follow-up
 questions in multiple turns, and only writes files after showing a draft.
 
+![](figures/pipeline.png)
 ## Workflows
 
 The CLI exposes four top-level planning workflows:
